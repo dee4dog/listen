@@ -1,0 +1,592 @@
+"""MeetScribe main window."""
+import html
+import traceback
+from datetime import datetime
+from pathlib import Path
+
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
+from PySide6.QtGui import QAction, QColor
+from PySide6.QtWidgets import (
+    QApplication, QComboBox, QFileDialog, QHBoxLayout, QHeaderView, QLabel,
+    QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton,
+    QSplitter, QTableWidget, QTableWidgetItem, QTextBrowser, QToolBar,
+    QVBoxLayout, QWidget,
+)
+
+from .. import APP_NAME, data_dir, db, db_path
+from ..analysis.discussion import (DISCUSSION_TYPES, SECTION_TITLES, analyze,
+                                   items_for_section)
+from ..audio.recorder import Recorder
+from ..models import Segment, Session, fmt_ts
+from ..pipeline import run_pipeline
+from .dialogs import NewSessionDialog, SettingsDialog, SpeakerNameDialog
+
+DEFAULT_SETTINGS = {
+    "model_size": "small",
+    "language": "auto",
+    "translate": False,
+    "sensitivity": 0.55,
+    "match_threshold": 0.70,
+    "system_audio": True,
+    "default_dtype": "meeting",
+}
+
+AUDIO_FILTER = "Audio files (*.wav *.mp3 *.m4a *.mp4 *.flac *.ogg *.wma *.aac *.webm);;All files (*.*)"
+
+_SPEAKER_COLORS = ["#1f6feb", "#9a3fb0", "#0f7b4b", "#b35900", "#b30000",
+                   "#00707a", "#6d4c00", "#5145cd"]
+
+
+class PipelineWorker(QThread):
+    progress = Signal(str)
+    done = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, audio_path, title, dtype, cfg, database):
+        super().__init__()
+        self.audio_path = audio_path
+        self.title = title
+        self.dtype = dtype
+        self.cfg = cfg
+        self.database = database
+
+    def run(self):
+        try:
+            session = run_pipeline(
+                self.audio_path, self.title, self.dtype, self.cfg,
+                self.database, progress=self.progress.emit)
+            self.done.emit(session)
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle(APP_NAME)
+        self.resize(1200, 780)
+        self.database = db_path()
+        db.init_db(self.database)
+        self.settings = db.get_settings(self.database, DEFAULT_SETTINGS)
+        self.session = None
+        self.recorder = None
+        self.worker = None
+        self._record_meta = None
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self._build_ui()
+        self.refresh_sessions()
+
+    # ------------------------------------------------------------------ UI
+
+    def _build_ui(self):
+        toolbar = QToolBar("Main")
+        toolbar.setMovable(False)
+        self.addToolBar(toolbar)
+
+        self.record_action = QAction("● Record", self)
+        self.record_action.triggered.connect(self.on_record)
+        self.stop_action = QAction("■ Stop", self)
+        self.stop_action.triggered.connect(self.on_stop)
+        self.stop_action.setEnabled(False)
+        self.import_action = QAction("Import audio…", self)
+        self.import_action.triggered.connect(self.on_import)
+        self.rename_action = QAction("Name speakers…", self)
+        self.rename_action.triggered.connect(self.on_rename_speakers)
+        self.save_action = QAction("Save changes", self)
+        self.save_action.setToolTip(
+            "Save edits to the transcript and re-run the analysis")
+        self.save_action.triggered.connect(self.on_save_changes)
+        self.translate_action = QAction("Translate to English", self)
+        self.translate_action.setToolTip(
+            "Re-process this session's audio, translating the speech "
+            "(e.g. Afrikaans) into an English transcript as a new session")
+        self.translate_action.triggered.connect(self.on_translate)
+        self.export_pdf_action = QAction("Export PDF", self)
+        self.export_pdf_action.triggered.connect(lambda: self.on_export("pdf"))
+        self.export_docx_action = QAction("Export Word", self)
+        self.export_docx_action.triggered.connect(lambda: self.on_export("docx"))
+        self.export_xlsx_action = QAction("Export Excel", self)
+        self.export_xlsx_action.triggered.connect(lambda: self.on_export("xlsx"))
+        self.delete_action = QAction("Delete session", self)
+        self.delete_action.triggered.connect(self.on_delete_session)
+        self.settings_action = QAction("Settings…", self)
+        self.settings_action.triggered.connect(self.on_settings)
+
+        for action in (self.record_action, self.stop_action, self.import_action):
+            toolbar.addAction(action)
+        toolbar.addSeparator()
+        for action in (self.rename_action, self.save_action,
+                       self.translate_action):
+            toolbar.addAction(action)
+        toolbar.addSeparator()
+        for action in (self.export_pdf_action, self.export_docx_action,
+                       self.export_xlsx_action):
+            toolbar.addAction(action)
+        toolbar.addSeparator()
+        toolbar.addAction(self.delete_action)
+        toolbar.addAction(self.settings_action)
+
+        self.session_list = QListWidget()
+        self.session_list.setMaximumWidth(320)
+        self.session_list.itemSelectionChanged.connect(self.on_session_selected)
+
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["Time", "Speaker", "Text"])
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
+        self.table.setWordWrap(True)
+        self.table.verticalHeader().setVisible(False)
+
+        filter_bar = QHBoxLayout()
+        filter_bar.setContentsMargins(4, 4, 4, 0)
+        filter_bar.addWidget(QLabel("Filter:"))
+        self.speaker_filter = QComboBox()
+        self.speaker_filter.addItem("All speakers", None)
+        self.speaker_filter.setMinimumWidth(160)
+        self.speaker_filter.currentIndexChanged.connect(self._apply_filters)
+        filter_bar.addWidget(self.speaker_filter)
+        self.kind_filter = QComboBox()
+        self.kind_filter.addItem("All items", None)
+        kind_labels = {"actions": "Tasks / action items", "decisions": "Decisions",
+                       "issues": "Key issues", "key_points": "Key points"}
+        for section in SECTION_TITLES:
+            self.kind_filter.addItem(kind_labels[section], section)
+        self.kind_filter.setMinimumWidth(160)
+        self.kind_filter.currentIndexChanged.connect(self._apply_filters)
+        filter_bar.addWidget(self.kind_filter)
+        clear_btn = QPushButton("Clear")
+        clear_btn.clicked.connect(self._clear_filters)
+        filter_bar.addWidget(clear_btn)
+        filter_bar.addStretch(1)
+
+        table_panel = QWidget()
+        panel_layout = QVBoxLayout(table_panel)
+        panel_layout.setContentsMargins(0, 0, 0, 0)
+        panel_layout.addLayout(filter_bar)
+        panel_layout.addWidget(self.table)
+
+        self.summary = QTextBrowser()
+        self.summary.setOpenExternalLinks(False)
+
+        right = QSplitter(Qt.Vertical)
+        right.addWidget(table_panel)
+        right.addWidget(self.summary)
+        right.setSizes([500, 280])
+
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.addWidget(self.session_list)
+        splitter.addWidget(right)
+        splitter.setSizes([280, 920])
+        self.setCentralWidget(splitter)
+
+        self.statusBar().showMessage("Ready")
+        self._update_actions()
+
+    def _update_actions(self):
+        busy = self.worker is not None and self.worker.isRunning()
+        recording = self.recorder is not None
+        has_session = self.session is not None
+        self.record_action.setEnabled(not busy and not recording)
+        self.stop_action.setEnabled(recording)
+        self.import_action.setEnabled(not busy and not recording)
+        for action in (self.rename_action, self.save_action, self.delete_action,
+                       self.export_pdf_action, self.export_docx_action,
+                       self.export_xlsx_action, self.translate_action):
+            action.setEnabled(has_session and not busy)
+
+    # ------------------------------------------------------------ recording
+
+    def on_record(self):
+        dialog = NewSessionDialog(
+            self, for_recording=True,
+            default_dtype=self.settings.get("default_dtype", "meeting"),
+            default_system_audio=bool(self.settings.get("system_audio", True)),
+            default_translate=bool(self.settings.get("translate", False)))
+        if dialog.exec() != NewSessionDialog.Accepted:
+            return
+        title, dtype, sys_audio, translate = dialog.values()
+        try:
+            self.recorder = Recorder(capture_system_audio=sys_audio)
+            self.recorder.start()
+        except Exception as exc:
+            self.recorder = None
+            QMessageBox.critical(self, APP_NAME, f"Could not start recording:\n{exc}")
+            return
+        self._record_meta = (title, dtype, translate)
+        note = ("mic + system audio" if self.recorder.system_audio_active
+                else "microphone only")
+        self.statusBar().showMessage(f"Recording ({note})… 00:00:00")
+        self._timer.start(1000)
+        self._update_actions()
+
+    def _tick(self):
+        if self.recorder:
+            base = self.statusBar().currentMessage().rsplit(" ", 1)[0]
+            self.statusBar().showMessage(f"{base} {fmt_ts(self.recorder.elapsed())}")
+
+    def on_stop(self):
+        if not self.recorder:
+            return
+        self._timer.stop()
+        out = data_dir() / "recordings" / f"rec_{datetime.now():%Y%m%d_%H%M%S}.wav"
+        recorder, self.recorder = self.recorder, None
+        try:
+            recorder.stop(out)
+        except Exception as exc:
+            QMessageBox.critical(self, APP_NAME, f"Recording failed:\n{exc}")
+            self._update_actions()
+            return
+        title, dtype, translate = self._record_meta
+        self._start_pipeline(out, title, dtype, translate=translate)
+
+    # -------------------------------------------------------------- import
+
+    def on_import(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Import audio", "", AUDIO_FILTER)
+        if not path:
+            return
+        dialog = NewSessionDialog(
+            self, for_recording=False,
+            default_dtype=self.settings.get("default_dtype", "meeting"),
+            title_hint=Path(path).stem,
+            default_translate=bool(self.settings.get("translate", False)))
+        if dialog.exec() != NewSessionDialog.Accepted:
+            return
+        title, dtype, _, translate = dialog.values()
+        self._start_pipeline(Path(path), title, dtype, translate=translate)
+
+    # ------------------------------------------------------------- pipeline
+
+    def _start_pipeline(self, audio_path, title, dtype, translate=False):
+        cfg = dict(self.settings)
+        cfg["task"] = "translate" if translate else "transcribe"
+        self.worker = PipelineWorker(audio_path, title, dtype, cfg, self.database)
+        self.worker.progress.connect(self.statusBar().showMessage)
+        self.worker.done.connect(self._pipeline_done)
+        self.worker.failed.connect(self._pipeline_failed)
+        self.worker.start()
+        self.statusBar().showMessage("Processing…")
+        self._update_actions()
+
+    def _pipeline_done(self, session):
+        self.worker = None
+        self.session = session
+        db.save_session(self.database, session)
+        self.refresh_sessions(select_id=session.id)
+        self.show_session()
+        self.statusBar().showMessage("Transcription complete.")
+        self._update_actions()
+        self.on_rename_speakers()
+
+    def _pipeline_failed(self, message):
+        self.worker = None
+        self.statusBar().showMessage("Processing failed.")
+        self._update_actions()
+        QMessageBox.critical(self, APP_NAME, f"Processing failed:\n\n{message}")
+
+    # ------------------------------------------------------------- sessions
+
+    def refresh_sessions(self, select_id=None):
+        self.session_list.blockSignals(True)
+        self.session_list.clear()
+        for sid, title, dtype, started in db.list_sessions(self.database):
+            label = DISCUSSION_TYPES.get(dtype, {}).get("label", dtype)
+            item = QListWidgetItem(f"{title}\n{label} — {started.replace('T', ' ')}")
+            item.setData(Qt.UserRole, sid)
+            self.session_list.addItem(item)
+            if select_id is not None and sid == select_id:
+                item.setSelected(True)
+                self.session_list.setCurrentItem(item)
+        self.session_list.blockSignals(False)
+
+    def on_session_selected(self):
+        items = self.session_list.selectedItems()
+        if not items:
+            return
+        sid = items[0].data(Qt.UserRole)
+        if self.session is not None and self.session.id == sid:
+            return
+        try:
+            self.session = db.load_session(self.database, sid)
+        except Exception as exc:
+            QMessageBox.critical(self, APP_NAME, f"Could not load session:\n{exc}")
+            return
+        self.show_session()
+        self._update_actions()
+
+    def on_delete_session(self):
+        if self.session is None or self.session.id is None:
+            return
+        answer = QMessageBox.question(
+            self, APP_NAME,
+            f"Delete session “{self.session.title}” and its transcript?")
+        if answer != QMessageBox.Yes:
+            return
+        db.delete_session(self.database, self.session.id)
+        self.session = None
+        self.table.setRowCount(0)
+        self.summary.clear()
+        self.refresh_sessions()
+        self._update_actions()
+
+    # -------------------------------------------------------------- display
+
+    def _speaker_color(self, name, palette={}):
+        if name not in palette:
+            palette[name] = _SPEAKER_COLORS[len(palette) % len(_SPEAKER_COLORS)]
+        return palette[name]
+
+    def show_session(self):
+        session = self.session
+        self.table.blockSignals(True)
+        self.table.setRowCount(len(session.segments))
+        colors = {}
+        for name in session.speaker_names():
+            colors[name] = _SPEAKER_COLORS[len(colors) % len(_SPEAKER_COLORS)]
+        for row, seg in enumerate(session.segments):
+            time_item = QTableWidgetItem(fmt_ts(seg.start))
+            time_item.setFlags(time_item.flags() & ~Qt.ItemIsEditable)
+            speaker_item = QTableWidgetItem(seg.speaker)
+            speaker_item.setForeground(QColor(colors.get(seg.speaker, "#000000")))
+            self.table.setItem(row, 0, time_item)
+            self.table.setItem(row, 1, speaker_item)
+            self.table.setItem(row, 2, QTableWidgetItem(seg.text))
+        self.table.resizeRowsToContents()
+        self.table.blockSignals(False)
+        self._populate_speaker_filter()
+        self._apply_filters()
+
+    # -------------------------------------------------------------- filters
+
+    def _populate_speaker_filter(self):
+        """Rebuild the speaker filter for the current session, keeping the
+        selection if that speaker still exists."""
+        current = self.speaker_filter.currentData()
+        self.speaker_filter.blockSignals(True)
+        self.speaker_filter.clear()
+        self.speaker_filter.addItem("All speakers", None)
+        for name in self.session.speaker_names():
+            self.speaker_filter.addItem(name, name)
+        idx = self.speaker_filter.findData(current)
+        self.speaker_filter.setCurrentIndex(idx if idx >= 0 else 0)
+        self.speaker_filter.blockSignals(False)
+
+    def _clear_filters(self):
+        self.speaker_filter.blockSignals(True)
+        self.kind_filter.blockSignals(True)
+        self.speaker_filter.setCurrentIndex(0)
+        self.kind_filter.setCurrentIndex(0)
+        self.speaker_filter.blockSignals(False)
+        self.kind_filter.blockSignals(False)
+        self._apply_filters()
+
+    def _apply_filters(self):
+        if self.session is None:
+            return
+        speaker = self.speaker_filter.currentData()
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 1)
+            hide = speaker is not None and (item is None or item.text() != speaker)
+            self.table.setRowHidden(row, hide)
+        self._render_summary()
+
+    def _filters_active(self):
+        return (self.speaker_filter.currentData() is not None
+                or self.kind_filter.currentData() is not None)
+
+    def _filtered_session(self):
+        """A copy of the current session containing only what the active
+        filters show; the session itself if no filters are set."""
+        self._collect_table()
+        speaker = self.speaker_filter.currentData()
+        kind = self.kind_filter.currentData()
+        if speaker is None and kind is None:
+            return self.session
+        src = self.session
+        segments = [s for s in src.segments
+                    if speaker is None or s.speaker == speaker]
+        issues = [i for i in src.issues
+                  if speaker is None or i.speaker == speaker]
+        if kind is not None:
+            issues = items_for_section(issues, kind)
+        suffix = " — " + ", ".join(
+            part for part in (speaker, SECTION_TITLES.get(kind)) if part)
+        return Session(title=src.title + suffix, dtype=src.dtype,
+                       started_at=src.started_at, audio_path=src.audio_path,
+                       duration=src.duration, segments=segments, issues=issues,
+                       sections_override=[kind] if kind is not None else None)
+
+    def _render_summary(self):
+        session = self.session
+        speaker = self.speaker_filter.currentData()
+        kind = self.kind_filter.currentData()
+        dtype = DISCUSSION_TYPES.get(session.dtype, DISCUSSION_TYPES["general"])
+        parts = [
+            f"<h2>{html.escape(session.title)}</h2>",
+            f"<p><b>{dtype['label']}</b> — {session.started_at.replace('T', ' ')} — "
+            f"duration {fmt_ts(session.duration)}<br>"
+            f"Participants: {html.escape(', '.join(session.speaker_names()) or '—')}</p>",
+        ]
+        header_len = len(parts)
+        if speaker is not None or kind is not None:
+            active = ", ".join(part for part in
+                               (speaker, SECTION_TITLES.get(kind)) if part)
+            parts.append(f"<p style='color:#1f6feb'><b>Filtered: "
+                         f"{html.escape(active)}</b> (exports follow this filter)</p>")
+            header_len += 1
+        visible_issues = [it for it in session.issues
+                          if speaker is None or it.speaker == speaker]
+        recurring = [it for it in visible_issues if it.recurring]
+        if recurring:
+            parts.append(
+                f"<p style='color:#b30000'><b>⚠ {len(recurring)} recurring "
+                f"issue(s) flagged — raised in earlier sessions.</b></p>")
+            header_len += 1
+        # A kind filter shows just that section, even if the discussion type
+        # normally hides it.
+        sections = [kind] if kind is not None else dtype["sections"]
+        for section in sections:
+            items = items_for_section(visible_issues, section)
+            if not items:
+                continue
+            parts.append(f"<h3>{SECTION_TITLES[section]}</h3><ul>")
+            for item in items:
+                who = (f"<b>{html.escape(item.speaker)}:</b> "
+                       if item.speaker else "")
+                flag = ""
+                if item.recurring:
+                    flag = (f" <b style='color:#b30000'>[RECURRING — first raised "
+                            f"{html.escape(item.prior_date or 'earlier')}]</b>")
+                parts.append(f"<li>{who}{html.escape(item.text)}{flag}</li>")
+            parts.append("</ul>")
+        if len(parts) <= header_len:
+            parts.append("<p><i>Nothing matches the current filter.</i></p>"
+                         if (speaker is not None or kind is not None) else
+                         "<p><i>No action items or issues were detected.</i></p>")
+        self.summary.setHtml("".join(parts))
+
+    # ---------------------------------------------------------------- edits
+
+    def _collect_table(self):
+        """Pull edited speaker/text values from the table back into the session."""
+        segments = []
+        for row, seg in enumerate(self.session.segments):
+            speaker_item = self.table.item(row, 1)
+            text_item = self.table.item(row, 2)
+            speaker = speaker_item.text().strip() if speaker_item else seg.speaker
+            text = text_item.text().strip() if text_item else seg.text
+            segments.append(Segment(seg.start, seg.end, speaker or seg.speaker, text))
+        self.session.segments = segments
+
+    def on_save_changes(self):
+        if self.session is None:
+            return
+        self._collect_table()
+        prior = db.get_prior_issues(self.database,
+                                    exclude_session_id=self.session.id)
+        self.session.issues = analyze(self.session.segments, prior_issues=prior)
+        db.save_session(self.database, self.session)
+        self.show_session()
+        self.statusBar().showMessage("Changes saved and analysis re-run.")
+
+    def on_translate(self):
+        """Re-process the current session's audio with Whisper's translate task,
+        producing an English transcript as a new session."""
+        if self.session is None:
+            return
+        audio = Path(self.session.audio_path) if self.session.audio_path else None
+        if audio is None or not audio.exists():
+            QMessageBox.warning(
+                self, APP_NAME,
+                "The original audio file for this session is no longer "
+                "available, so it cannot be re-processed.")
+            return
+        answer = QMessageBox.question(
+            self, APP_NAME,
+            f"Translate the audio of “{self.session.title}” into an English "
+            f"transcript? It will be saved as a new session.")
+        if answer != QMessageBox.Yes:
+            return
+        self._start_pipeline(audio, f"{self.session.title} (English)",
+                             self.session.dtype, translate=True)
+
+    def on_rename_speakers(self):
+        if self.session is None:
+            return
+        self._collect_table()
+        labels = self.session.speaker_names()
+        if not labels:
+            return
+        dialog = SpeakerNameDialog(self, labels,
+                                   has_voice_profiles=set(self.session.centroids))
+        if dialog.exec() != SpeakerNameDialog.Accepted:
+            return
+        mapping = dialog.mapping()
+        if not mapping:
+            return
+        for seg in self.session.segments:
+            if seg.speaker in mapping:
+                seg.speaker = mapping[seg.speaker][0]
+        for item in self.session.issues:
+            if item.speaker in mapping:
+                item.speaker = mapping[item.speaker][0]
+        for old, (new, remember) in mapping.items():
+            centroid = self.session.centroids.pop(old, None)
+            if centroid is not None:
+                self.session.centroids[new] = centroid
+                if remember:
+                    db.save_speaker(self.database, new, centroid)
+        db.save_session(self.database, self.session)
+        self.refresh_sessions(select_id=self.session.id)
+        self.show_session()
+        self.statusBar().showMessage("Speakers updated.")
+
+    # -------------------------------------------------------------- exports
+
+    def on_export(self, fmt):
+        if self.session is None:
+            return
+        session = self._filtered_session()
+        safe = "".join(c for c in session.title if c.isalnum() or c in " -_").strip()
+        default = str(data_dir() / "exports" / f"{safe or 'session'}.{fmt}")
+        filters = {"pdf": "PDF (*.pdf)", "docx": "Word document (*.docx)",
+                   "xlsx": "Excel workbook (*.xlsx)"}
+        path, _ = QFileDialog.getSaveFileName(self, "Export", default, filters[fmt])
+        if not path:
+            return
+        try:
+            if fmt == "pdf":
+                from ..exporters.pdf_export import export_pdf
+                export_pdf(session, path)
+            elif fmt == "docx":
+                from ..exporters.docx_export import export_docx
+                export_docx(session, path)
+            else:
+                from ..exporters.xlsx_export import export_xlsx
+                export_xlsx(session, path)
+        except Exception as exc:
+            QMessageBox.critical(self, APP_NAME, f"Export failed:\n{exc}")
+            return
+        note = " (filtered)" if self._filters_active() else ""
+        self.statusBar().showMessage(f"Exported{note} to {path}")
+
+    # ------------------------------------------------------------- settings
+
+    def on_settings(self):
+        dialog = SettingsDialog(self, self.settings)
+        if dialog.exec() == SettingsDialog.Accepted:
+            self.settings.update(dialog.values())
+            db.save_settings(self.database, self.settings)
+            self.statusBar().showMessage("Settings saved.")
+
+
+def main():
+    import sys
+    app = QApplication(sys.argv)
+    app.setApplicationName(APP_NAME)
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())
