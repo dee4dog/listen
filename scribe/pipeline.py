@@ -1,6 +1,8 @@
 """End-to-end processing: transcribe -> separate speakers -> recognise known
 voices -> deduce names from introductions -> analyse the discussion."""
+import wave
 from datetime import datetime
+from pathlib import Path
 
 from . import data_dir, db
 from .analysis.discussion import analyze
@@ -68,3 +70,45 @@ def run_pipeline(audio_path, title, dtype, cfg, database, progress=lambda msg: N
         issues=issues,
         centroids=centroids,
     )
+
+
+def merge_sessions(old, new, database, recordings_dir):
+    """Append a freshly transcribed `new` session onto `old` (continue mode).
+
+    New segments are shifted by the old recording's length, the audio files
+    are joined into one WAV (so segment replay works across the whole
+    session), and the analysis is re-run over the combined transcript.
+    """
+    import numpy as np
+
+    offset = float(old.duration or 0.0)
+    old_audio = Path(old.audio_path) if old.audio_path else None
+    if old_audio is not None and old_audio.exists():
+        from faster_whisper.audio import decode_audio
+        a = decode_audio(str(old_audio), sampling_rate=16000)
+        b = decode_audio(str(new.audio_path), sampling_rate=16000)
+        offset = len(a) / 16000.0
+        mix = np.concatenate([a, b])
+        out = Path(recordings_dir) / f"rec_{datetime.now():%Y%m%d_%H%M%S}_full.wav"
+        pcm = (np.clip(mix, -1.0, 1.0) * 32767).astype(np.int16)
+        with wave.open(str(out), "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(16000)
+            wf.writeframes(pcm.tobytes())
+        old.audio_path = str(out)
+        old.duration = len(mix) / 16000.0
+    else:
+        # Original audio is gone; keep the new recording and stack durations.
+        old.audio_path = str(new.audio_path)
+        old.duration = offset + float(new.duration)
+
+    for seg in new.segments:
+        seg.start += offset
+        seg.end += offset
+    old.segments = list(old.segments) + list(new.segments)
+
+    prior = db.get_prior_issues(database, exclude_session_id=old.id)
+    old.issues = analyze(old.segments, prior_issues=prior)
+    old.centroids = new.centroids
+    return old

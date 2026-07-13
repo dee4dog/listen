@@ -28,7 +28,10 @@ your own central server on the local network).
   Their voice profile is stored, and in future recordings they are recognised
   and named automatically.
 - **Naming after transcription**: a dialog lets you rename Speaker 1/2/3 to
-  real names; you can also edit any speaker cell in the transcript directly.
+  real names (with a ▶ button to hear each voice). Speakers stay editable
+  afterwards: double-click a Speaker cell for a dropdown of the session's
+  speakers (or type a new name), or right-click any transcript line for
+  *Rename everywhere* and *Assign this line to*.
 - **Re-evaluation**: transcript text and speaker assignments are editable.
   *Save changes* stores your corrections and re-runs the analysis.
 - **Discussion types** — Meeting, Brief, General discussion, Interview — each

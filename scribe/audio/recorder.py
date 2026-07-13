@@ -29,6 +29,7 @@ class Recorder:
 
         self._stop.clear()
         self._buffers = {"mic": [], "sys": []}
+        self._levels = {"mic": 0.0, "sys": 0.0}
         self._error = None
 
         mic = sc.default_microphone()
@@ -64,12 +65,18 @@ class Recorder:
             with device.recorder(samplerate=SAMPLE_RATE, channels=1, blocksize=BLOCK) as rec:
                 while not self._stop.is_set():
                     data = rec.record(numframes=BLOCK)
-                    self._buffers[key].append(data[:, 0].copy())
+                    mono = data[:, 0]
+                    self._buffers[key].append(mono.copy())
+                    self._levels[key] = float(np.sqrt(np.mean(mono ** 2)))
         except Exception as exc:
             self._error = f"{key} capture failed: {exc}"
 
     def elapsed(self) -> float:
         return time.time() - self.started_at if self.started_at else 0.0
+
+    def level(self) -> float:
+        """Loudest current input level (RMS, 0..1) across mic and system audio."""
+        return max(self._levels.values()) if self._levels else 0.0
 
     def stop(self, out_path):
         """Stop capture, mix mic + system audio, write 16 kHz mono WAV."""

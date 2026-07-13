@@ -1,14 +1,53 @@
-"""Dialogs: new session, speaker naming, settings."""
+"""Dialogs: new session, continue-or-new prompt, speaker naming, settings."""
 from datetime import datetime
+from pathlib import Path
 
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout,
-    QGridLayout, QGroupBox, QLabel, QLineEdit, QVBoxLayout,
+    QGridLayout, QGroupBox, QLabel, QLineEdit, QPushButton, QRadioButton,
+    QVBoxLayout,
 )
 
 from ..analysis.discussion import DISCUSSION_TYPES
 
 MODEL_SIZES = ["tiny", "base", "small", "medium", "large-v3"]
+
+
+class ContinueDialog(QDialog):
+    """Asked when Record is pressed and earlier sessions exist:
+    start fresh, or append to a previous session?"""
+
+    def __init__(self, parent, sessions):
+        super().__init__(parent)
+        self.setWindowTitle("Record")
+        outer = QVBoxLayout(self)
+        outer.addWidget(QLabel("Start a new session or continue a previous one?"))
+
+        self.new_radio = QRadioButton("Start a new session")
+        self.new_radio.setChecked(True)
+        outer.addWidget(self.new_radio)
+
+        self.cont_radio = QRadioButton("Continue a previous session:")
+        outer.addWidget(self.cont_radio)
+        self.session_combo = QComboBox()
+        for sid, title, _dtype, started in sessions:
+            self.session_combo.addItem(
+                f"{title}  ({started[:16].replace('T', ' ')})", sid)
+        self.session_combo.setEnabled(False)
+        self.cont_radio.toggled.connect(self.session_combo.setEnabled)
+        outer.addWidget(self.session_combo)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=self)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        outer.addWidget(buttons)
+
+    def choice(self):
+        """('continue', session_id) or ('new', None)."""
+        if self.cont_radio.isChecked() and self.session_combo.count():
+            return "continue", self.session_combo.currentData()
+        return "new", None
 
 
 class NewSessionDialog(QDialog):
@@ -58,28 +97,42 @@ class NewSessionDialog(QDialog):
 
 
 class SpeakerNameDialog(QDialog):
-    """Rename detected speakers; optionally save their voice to the database."""
+    """Rename detected speakers; optionally save their voice to the database.
+    The ▶ button plays that speaker's longest sentence for identification."""
 
-    def __init__(self, parent, labels, has_voice_profiles):
+    def __init__(self, parent, labels, has_voice_profiles,
+                 session=None, player=None):
         super().__init__(parent)
         self.setWindowTitle("Name the speakers")
-        self.setMinimumWidth(460)
+        self.setMinimumWidth(500)
+        self._session = session
+        self._player = player
+        can_play = bool(
+            session is not None and player is not None and session.audio_path
+            and Path(session.audio_path).exists())
         outer = QVBoxLayout(self)
         outer.addWidget(QLabel(
-            "Give each detected speaker a name. Tick “Remember voice” to store the\n"
-            "voice profile so this person is recognised automatically next time."))
+            "Give each detected speaker a name — press ▶ to hear that speaker.\n"
+            "Tick “Remember voice” to store the voice profile so this person is\n"
+            "recognised automatically next time."))
 
         grid = QGridLayout()
         self._rows = []
         for row, label in enumerate(labels):
             grid.addWidget(QLabel(label), row, 0)
+            play = QPushButton("▶")
+            play.setFixedWidth(36)
+            play.setToolTip(f"Play a sentence spoken by {label}")
+            play.setEnabled(can_play)
+            play.clicked.connect(lambda _=False, lab=label: self._play(lab))
+            grid.addWidget(play, row, 1)
             edit = QLineEdit(label if not label.startswith("Speaker ") else "")
             edit.setPlaceholderText("Name…")
-            grid.addWidget(edit, row, 1)
+            grid.addWidget(edit, row, 2)
             remember = QCheckBox("Remember voice")
             remember.setEnabled(label in has_voice_profiles)
             remember.setChecked(label in has_voice_profiles)
-            grid.addWidget(remember, row, 2)
+            grid.addWidget(remember, row, 3)
             self._rows.append((label, edit, remember))
         outer.addLayout(grid)
 
@@ -88,6 +141,13 @@ class SpeakerNameDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         outer.addWidget(buttons)
+
+    def _play(self, label):
+        """Play the longest sentence spoken by `label`."""
+        seg = max((s for s in self._session.segments if s.speaker == label),
+                  key=lambda s: s.end - s.start, default=None)
+        if seg is not None:
+            self._player.play(self._session.audio_path, seg.start, seg.end)
 
     def mapping(self):
         """Return {old_label: (new_name, remember_voice)} for renamed speakers."""

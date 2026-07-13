@@ -7,19 +7,22 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QAction, QColor
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QFileDialog, QHBoxLayout, QHeaderView, QLabel,
-    QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton,
-    QSplitter, QTableWidget, QTableWidgetItem, QTextBrowser, QToolBar,
-    QVBoxLayout, QWidget,
+    QApplication, QComboBox, QFileDialog, QHBoxLayout, QHeaderView,
+    QInputDialog, QLabel, QListWidget, QListWidgetItem, QMainWindow, QMenu,
+    QMessageBox, QProgressBar, QPushButton, QSplitter, QStyledItemDelegate,
+    QTableWidget, QTableWidgetItem, QTextBrowser, QToolBar, QVBoxLayout,
+    QWidget,
 )
 
 from .. import APP_NAME, data_dir, db, db_path
 from ..analysis.discussion import (DISCUSSION_TYPES, SECTION_TITLES, analyze,
                                    items_for_section)
+from ..audio.player import SegmentPlayer
 from ..audio.recorder import Recorder
 from ..models import Segment, Session, fmt_ts
-from ..pipeline import run_pipeline
-from .dialogs import NewSessionDialog, SettingsDialog, SpeakerNameDialog
+from ..pipeline import merge_sessions, run_pipeline
+from .dialogs import (ContinueDialog, NewSessionDialog, SettingsDialog,
+                      SpeakerNameDialog)
 from . import theme
 
 DEFAULT_SETTINGS = {
@@ -32,11 +35,34 @@ DEFAULT_SETTINGS = {
     "default_dtype": "meeting",
     "server_url": "",
     "api_key": "",
+    "theme": "dark",
 }
 
 AUDIO_FILTER = "Audio files (*.wav *.mp3 *.m4a *.mp4 *.flac *.ogg *.wma *.aac *.webm);;All files (*.*)"
 
-_SPEAKER_COLORS = theme.SPEAKER_COLORS
+
+class SpeakerDelegate(QStyledItemDelegate):
+    """Double-clicking a Speaker cell opens a dropdown of the session's
+    speakers; a new name can also be typed directly."""
+
+    def __init__(self, window):
+        super().__init__(window)
+        self._window = window
+
+    def createEditor(self, parent, option, index):
+        combo = QComboBox(parent)
+        combo.setEditable(True)
+        if self._window.session is not None:
+            combo.addItems(self._window.session.speaker_names())
+        return combo
+
+    def setEditorData(self, editor, index):
+        editor.setCurrentText(index.data() or "")
+
+    def setModelData(self, editor, model, index):
+        name = editor.currentText().strip()
+        if name:
+            model.setData(index, name)
 
 
 class PushWorker(QThread):
@@ -89,13 +115,20 @@ class MainWindow(QMainWindow):
         self.database = db_path()
         db.init_db(self.database)
         self.settings = db.get_settings(self.database, DEFAULT_SETTINGS)
+        theme.apply_theme(QApplication.instance(),
+                          self.settings.get("theme", "dark"))
         self.session = None
         self.recorder = None
         self.worker = None
         self.push_worker = None
+        self.player = SegmentPlayer()
+        self._merge_into = None
         self._record_meta = None
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
+        self._level_timer = QTimer(self)
+        self._level_timer.setInterval(100)
+        self._level_timer.timeout.connect(self._update_level)
         self._build_ui()
         self.refresh_sessions()
 
@@ -105,10 +138,6 @@ class MainWindow(QMainWindow):
         toolbar = QToolBar("Main")
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
-
-        app_title = QLabel(APP_NAME.lower())
-        app_title.setObjectName("appTitle")
-        toolbar.addWidget(app_title)
 
         self.record_action = QAction("● Record", self)
         self.record_action.triggered.connect(self.on_record)
@@ -160,8 +189,26 @@ class MainWindow(QMainWindow):
         toolbar.addAction(self.settings_action)
 
         self.session_list = QListWidget()
-        self.session_list.setMaximumWidth(320)
         self.session_list.itemSelectionChanged.connect(self.on_session_selected)
+
+        # Left panel: logo, theme toggle below it, then the session list.
+        self.logo_label = QLabel()
+        self.logo_label.setObjectName("appTitle")
+        self.logo_label.setAlignment(Qt.AlignHCenter)
+        self.theme_btn = QPushButton()
+        self.theme_btn.setObjectName("themeToggle")
+        self.theme_btn.setToolTip("Switch between the dark and light theme")
+        self.theme_btn.clicked.connect(self.on_toggle_theme)
+        self._update_theme_button()
+
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(6)
+        left_layout.addWidget(self.logo_label)
+        left_layout.addWidget(self.theme_btn, alignment=Qt.AlignHCenter)
+        left_layout.addWidget(self.session_list)
+        left_panel.setMaximumWidth(320)
 
         self.table = QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(["Time", "Speaker", "Text"])
@@ -173,6 +220,10 @@ class MainWindow(QMainWindow):
         self.table.verticalHeader().setVisible(False)
         self.table.setAlternatingRowColors(True)
         self.table.setShowGrid(False)
+        self.table.cellClicked.connect(self.on_table_cell_clicked)
+        self.table.setItemDelegateForColumn(1, SpeakerDelegate(self))
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self.on_table_menu)
 
         filter_bar = QHBoxLayout()
         filter_bar.setContentsMargins(4, 4, 4, 0)
@@ -211,10 +262,21 @@ class MainWindow(QMainWindow):
         right.setSizes([500, 280])
 
         splitter = QSplitter(Qt.Horizontal)
-        splitter.addWidget(self.session_list)
+        splitter.addWidget(left_panel)
         splitter.addWidget(right)
         splitter.setSizes([280, 920])
         self.setCentralWidget(splitter)
+
+        self.level_label = QLabel("🎤")
+        self.level_label.hide()
+        self.level_bar = QProgressBar()
+        self.level_bar.setRange(0, 100)
+        self.level_bar.setTextVisible(False)
+        self.level_bar.setFixedSize(160, 14)
+        self.level_bar.setToolTip("Recording input level (mic + system audio)")
+        self.level_bar.hide()
+        self.statusBar().addPermanentWidget(self.level_label)
+        self.statusBar().addPermanentWidget(self.level_bar)
 
         self.statusBar().showMessage("Ready")
         self._update_actions()
@@ -236,27 +298,60 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ recording
 
     def on_record(self):
-        dialog = NewSessionDialog(
-            self, for_recording=True,
-            default_dtype=self.settings.get("default_dtype", "meeting"),
-            default_system_audio=bool(self.settings.get("system_audio", True)),
-            default_translate=bool(self.settings.get("translate", False)))
-        if dialog.exec() != NewSessionDialog.Accepted:
-            return
-        title, dtype, sys_audio, translate = dialog.values()
+        self._merge_into = None
+        sessions = db.list_sessions(self.database)
+        if sessions:
+            cont = ContinueDialog(self, sessions)
+            if cont.exec() != ContinueDialog.Accepted:
+                return
+            mode, sid = cont.choice()
+            if mode == "continue":
+                try:
+                    self._merge_into = db.load_session(self.database, sid)
+                except Exception as exc:
+                    QMessageBox.critical(self, APP_NAME,
+                                         f"Could not load session:\n{exc}")
+                    return
+
+        if self._merge_into is not None:
+            title = self._merge_into.title
+            dtype = self._merge_into.dtype
+            sys_audio = bool(self.settings.get("system_audio", True))
+            translate = bool(self.settings.get("translate", False))
+        else:
+            dialog = NewSessionDialog(
+                self, for_recording=True,
+                default_dtype=self.settings.get("default_dtype", "meeting"),
+                default_system_audio=bool(self.settings.get("system_audio", True)),
+                default_translate=bool(self.settings.get("translate", False)))
+            if dialog.exec() != NewSessionDialog.Accepted:
+                self._merge_into = None
+                return
+            title, dtype, sys_audio, translate = dialog.values()
+
         try:
             self.recorder = Recorder(capture_system_audio=sys_audio)
             self.recorder.start()
         except Exception as exc:
             self.recorder = None
+            self._merge_into = None
             QMessageBox.critical(self, APP_NAME, f"Could not start recording:\n{exc}")
             return
         self._record_meta = (title, dtype, translate)
         note = ("mic + system audio" if self.recorder.system_audio_active
                 else "microphone only")
-        self.statusBar().showMessage(f"Recording ({note})… 00:00:00")
+        verb = "Continuing" if self._merge_into is not None else "Recording"
+        self.statusBar().showMessage(f"{verb} “{title}” ({note})… 00:00:00")
         self._timer.start(1000)
+        self.level_label.show()
+        self.level_bar.show()
+        self._level_timer.start()
         self._update_actions()
+
+    def _update_level(self):
+        if self.recorder is not None:
+            level = min(1.0, self.recorder.level() * 6.0)
+            self.level_bar.setValue(int(level * 100))
 
     def _tick(self):
         if self.recorder:
@@ -267,11 +362,16 @@ class MainWindow(QMainWindow):
         if not self.recorder:
             return
         self._timer.stop()
+        self._level_timer.stop()
+        self.level_label.hide()
+        self.level_bar.hide()
+        self.level_bar.setValue(0)
         out = data_dir() / "recordings" / f"rec_{datetime.now():%Y%m%d_%H%M%S}.wav"
         recorder, self.recorder = self.recorder, None
         try:
             recorder.stop(out)
         except Exception as exc:
+            self._merge_into = None
             QMessageBox.critical(self, APP_NAME, f"Recording failed:\n{exc}")
             self._update_actions()
             return
@@ -281,6 +381,7 @@ class MainWindow(QMainWindow):
     # -------------------------------------------------------------- import
 
     def on_import(self):
+        self._merge_into = None
         path, _ = QFileDialog.getOpenFileName(self, "Import audio", "", AUDIO_FILTER)
         if not path:
             return
@@ -309,6 +410,16 @@ class MainWindow(QMainWindow):
 
     def _pipeline_done(self, session):
         self.worker = None
+        if self._merge_into is not None:
+            old, self._merge_into = self._merge_into, None
+            try:
+                session = merge_sessions(old, session, self.database,
+                                         data_dir() / "recordings")
+            except Exception as exc:
+                QMessageBox.warning(
+                    self, APP_NAME,
+                    f"Could not append to “{old.title}” ({exc}); "
+                    f"saving as a separate session instead.")
         self.session = session
         db.save_session(self.database, session)
         self.refresh_sessions(select_id=session.id)
@@ -319,6 +430,7 @@ class MainWindow(QMainWindow):
 
     def _pipeline_failed(self, message):
         self.worker = None
+        self._merge_into = None
         self.statusBar().showMessage("Processing failed.")
         self._update_actions()
         QMessageBox.critical(self, APP_NAME, f"Processing failed:\n\n{message}")
@@ -368,20 +480,34 @@ class MainWindow(QMainWindow):
         self.refresh_sessions()
         self._update_actions()
 
-    # -------------------------------------------------------------- display
+    # ---------------------------------------------------------------- theme
 
-    def _speaker_color(self, name, palette={}):
-        if name not in palette:
-            palette[name] = _SPEAKER_COLORS[len(palette) % len(_SPEAKER_COLORS)]
-        return palette[name]
+    def _update_theme_button(self):
+        dark = self.settings.get("theme", "dark") == "dark"
+        self.theme_btn.setText("☀  Light theme" if dark else "🌙  Dark theme")
+        self.logo_label.setPixmap(theme.logo_pixmap(theme.ACCENT, height=52))
+
+    def on_toggle_theme(self):
+        mode = ("light" if self.settings.get("theme", "dark") == "dark"
+                else "dark")
+        self.settings["theme"] = mode
+        db.save_settings(self.database, self.settings)
+        theme.apply_theme(QApplication.instance(), mode)
+        self._update_theme_button()
+        if self.session is not None:
+            self.show_session()   # re-colour speakers, timestamps, summary
+        self.statusBar().showMessage(f"{mode.capitalize()} theme applied.")
+
+    # -------------------------------------------------------------- display
 
     def show_session(self):
         session = self.session
         self.table.blockSignals(True)
         self.table.setRowCount(len(session.segments))
+        palette = theme.SPEAKER_COLORS
         colors = {}
         for name in session.speaker_names():
-            colors[name] = _SPEAKER_COLORS[len(colors) % len(_SPEAKER_COLORS)]
+            colors[name] = palette[len(colors) % len(palette)]
         for row, seg in enumerate(session.segments):
             time_item = QTableWidgetItem(fmt_ts(seg.start))
             time_item.setFlags(time_item.flags() & ~Qt.ItemIsEditable)
@@ -395,6 +521,92 @@ class MainWindow(QMainWindow):
         self.table.blockSignals(False)
         self._populate_speaker_filter()
         self._apply_filters()
+
+    def on_table_cell_clicked(self, row, col):
+        """Clicking a Speaker cell replays that sentence for identification."""
+        if col != 1 or self.session is None or row >= len(self.session.segments):
+            return
+        audio = self.session.audio_path
+        if not audio or not Path(audio).exists():
+            self.statusBar().showMessage(
+                "The audio file for this session is no longer available.")
+            return
+        seg = self.session.segments[row]
+        if self.player.play(audio, seg.start, seg.end):
+            self.statusBar().showMessage(
+                f"▶ Playing {seg.speaker} at {fmt_ts(seg.start)}…")
+
+    # -------------------------------------------------------- speaker edits
+
+    def on_table_menu(self, pos):
+        """Right-click menu on the transcript: play, reassign, rename."""
+        item = self.table.itemAt(pos)
+        if item is None or self.session is None:
+            return
+        row = item.row()
+        speaker_item = self.table.item(row, 1)
+        current = speaker_item.text() if speaker_item else ""
+
+        menu = QMenu(self)
+        play = menu.addAction("▶ Play this sentence")
+        rename_all = menu.addAction(f"Rename “{current}” everywhere…")
+        assign = menu.addMenu("Assign this line to")
+        names = []
+        for r in range(self.table.rowCount()):
+            it = self.table.item(r, 1)
+            if it and it.text() and it.text() not in names:
+                names.append(it.text())
+        for name in names:
+            action = assign.addAction(name)
+            action.setEnabled(name != current)
+        assign.addSeparator()
+        new_speaker = assign.addAction("New speaker…")
+
+        chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
+        if chosen is None:
+            return
+        if chosen == play:
+            self.on_table_cell_clicked(row, 1)
+        elif chosen == rename_all:
+            self.rename_speaker_everywhere(current)
+        elif chosen == new_speaker:
+            name, ok = QInputDialog.getText(
+                self, APP_NAME, "Assign this line to (new speaker name):")
+            if ok and name.strip():
+                self._assign_row(row, name.strip())
+        else:  # one of the existing speakers
+            self._assign_row(row, chosen.text())
+
+    def _assign_row(self, row, name):
+        """Reassign a single transcript line to `name` and save."""
+        self._collect_table()
+        self.session.segments[row].speaker = name
+        db.save_session(self.database, self.session)
+        self.show_session()
+        self.statusBar().showMessage(f"Line reassigned to {name}.")
+
+    def rename_speaker_everywhere(self, old):
+        """Rename a speaker across every line and summary item of the session."""
+        if not old:
+            return
+        new, ok = QInputDialog.getText(
+            self, APP_NAME, f"Rename “{old}” everywhere in this session to:",
+            text=old)
+        new = new.strip() if ok else ""
+        if not new or new == old:
+            return
+        self._collect_table()
+        for seg in self.session.segments:
+            if seg.speaker == old:
+                seg.speaker = new
+        for it in self.session.issues:
+            if it.speaker == old:
+                it.speaker = new
+        if old in self.session.centroids:
+            self.session.centroids[new] = self.session.centroids.pop(old)
+        db.save_session(self.database, self.session)
+        self.show_session()
+        self.statusBar().showMessage(f"“{old}” renamed to “{new}” everywhere.")
 
     # -------------------------------------------------------------- filters
 
@@ -564,7 +776,8 @@ class MainWindow(QMainWindow):
         if not labels:
             return
         dialog = SpeakerNameDialog(self, labels,
-                                   has_voice_profiles=set(self.session.centroids))
+                                   has_voice_profiles=set(self.session.centroids),
+                                   session=self.session, player=self.player)
         if dialog.exec() != SpeakerNameDialog.Accepted:
             return
         mapping = dialog.mapping()
@@ -671,6 +884,7 @@ def main():
     import sys
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
+    app.setWindowIcon(theme.app_icon())
     theme.apply_theme(app)
     window = MainWindow()
     window.show()
