@@ -20,6 +20,7 @@ from ..audio.recorder import Recorder
 from ..models import Segment, Session, fmt_ts
 from ..pipeline import run_pipeline
 from .dialogs import NewSessionDialog, SettingsDialog, SpeakerNameDialog
+from . import theme
 
 DEFAULT_SETTINGS = {
     "model_size": "small",
@@ -35,8 +36,7 @@ DEFAULT_SETTINGS = {
 
 AUDIO_FILTER = "Audio files (*.wav *.mp3 *.m4a *.mp4 *.flac *.ogg *.wma *.aac *.webm);;All files (*.*)"
 
-_SPEAKER_COLORS = ["#1f6feb", "#9a3fb0", "#0f7b4b", "#b35900", "#b30000",
-                   "#00707a", "#6d4c00", "#5145cd"]
+_SPEAKER_COLORS = theme.SPEAKER_COLORS
 
 
 class PushWorker(QThread):
@@ -106,6 +106,10 @@ class MainWindow(QMainWindow):
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
 
+        app_title = QLabel(APP_NAME.lower())
+        app_title.setObjectName("appTitle")
+        toolbar.addWidget(app_title)
+
         self.record_action = QAction("● Record", self)
         self.record_action.triggered.connect(self.on_record)
         self.stop_action = QAction("■ Stop", self)
@@ -167,6 +171,8 @@ class MainWindow(QMainWindow):
         header.setSectionResizeMode(2, QHeaderView.Stretch)
         self.table.setWordWrap(True)
         self.table.verticalHeader().setVisible(False)
+        self.table.setAlternatingRowColors(True)
+        self.table.setShowGrid(False)
 
         filter_bar = QHBoxLayout()
         filter_bar.setContentsMargins(4, 4, 4, 0)
@@ -379,8 +385,9 @@ class MainWindow(QMainWindow):
         for row, seg in enumerate(session.segments):
             time_item = QTableWidgetItem(fmt_ts(seg.start))
             time_item.setFlags(time_item.flags() & ~Qt.ItemIsEditable)
+            time_item.setForeground(QColor(theme.MUTED))
             speaker_item = QTableWidgetItem(seg.speaker)
-            speaker_item.setForeground(QColor(colors.get(seg.speaker, "#000000")))
+            speaker_item.setForeground(QColor(colors.get(seg.speaker, theme.TEXT)))
             self.table.setItem(row, 0, time_item)
             self.table.setItem(row, 1, speaker_item)
             self.table.setItem(row, 2, QTableWidgetItem(seg.text))
@@ -454,9 +461,15 @@ class MainWindow(QMainWindow):
         speaker = self.speaker_filter.currentData()
         kind = self.kind_filter.currentData()
         dtype = DISCUSSION_TYPES.get(session.dtype, DISCUSSION_TYPES["general"])
+        grunge = theme.grunge_font_family()
+        h2 = (f"font-family:'{grunge}'; color:{theme.ACCENT}; "
+              f"letter-spacing:2px; margin-bottom:2px;")
+        h3 = (f"font-family:'{grunge}'; color:{theme.ACCENT_SOFT}; "
+              f"letter-spacing:1px; margin-bottom:2px;")
         parts = [
-            f"<h2>{html.escape(session.title)}</h2>",
-            f"<p><b>{dtype['label']}</b> — {session.started_at.replace('T', ' ')} — "
+            f"<h2 style=\"{h2}\">{html.escape(session.title)}</h2>",
+            f"<p style='color:{theme.MUTED}'><b>{dtype['label']}</b> — "
+            f"{session.started_at.replace('T', ' ')} — "
             f"duration {fmt_ts(session.duration)}<br>"
             f"Participants: {html.escape(', '.join(session.speaker_names()) or '—')}</p>",
         ]
@@ -464,7 +477,7 @@ class MainWindow(QMainWindow):
         if speaker is not None or kind is not None:
             active = ", ".join(part for part in
                                (speaker, SECTION_TITLES.get(kind)) if part)
-            parts.append(f"<p style='color:#1f6feb'><b>Filtered: "
+            parts.append(f"<p style='color:{theme.INFO}'><b>Filtered: "
                          f"{html.escape(active)}</b> (exports follow this filter)</p>")
             header_len += 1
         visible_issues = [it for it in session.issues
@@ -472,7 +485,7 @@ class MainWindow(QMainWindow):
         recurring = [it for it in visible_issues if it.recurring]
         if recurring:
             parts.append(
-                f"<p style='color:#b30000'><b>⚠ {len(recurring)} recurring "
+                f"<p style='color:{theme.WARN}'><b>⚠ {len(recurring)} recurring "
                 f"issue(s) flagged — raised in earlier sessions.</b></p>")
             header_len += 1
         # A kind filter shows just that section, even if the discussion type
@@ -482,13 +495,13 @@ class MainWindow(QMainWindow):
             items = items_for_section(visible_issues, section)
             if not items:
                 continue
-            parts.append(f"<h3>{SECTION_TITLES[section]}</h3><ul>")
+            parts.append(f"<h3 style=\"{h3}\">{SECTION_TITLES[section]}</h3><ul>")
             for item in items:
-                who = (f"<b>{html.escape(item.speaker)}:</b> "
+                who = (f"<b style='color:{theme.INFO}'>{html.escape(item.speaker)}:</b> "
                        if item.speaker else "")
                 flag = ""
                 if item.recurring:
-                    flag = (f" <b style='color:#b30000'>[RECURRING — first raised "
+                    flag = (f" <b style='color:{theme.WARN}'>[RECURRING — first raised "
                             f"{html.escape(item.prior_date or 'earlier')}]</b>")
                 parts.append(f"<li>{who}{html.escape(item.text)}{flag}</li>")
             parts.append("</ul>")
@@ -658,6 +671,7 @@ def main():
     import sys
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
+    theme.apply_theme(app)
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
