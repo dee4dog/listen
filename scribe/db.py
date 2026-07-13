@@ -57,6 +57,16 @@ def _connect(path):
 def init_db(path):
     with _connect(path) as con:
         con.executescript(_SCHEMA)
+        try:
+            con.execute("ALTER TABLE sessions ADD COLUMN synced_at TEXT")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+
+
+def mark_synced(path, session_id):
+    with _connect(path) as con:
+        con.execute("UPDATE sessions SET synced_at = ? WHERE id = ?",
+                    (datetime.now().isoformat(timespec="seconds"), session_id))
 
 
 # ---------------------------------------------------------------- settings

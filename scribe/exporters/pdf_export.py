@@ -56,6 +56,6 @@ def export_pdf(session, path):
             speaker_style))
 
     doc = SimpleDocTemplate(str(path), pagesize=A4,
-                            title=session.title, author="MeetScribe")
+                            title=session.title, author="Listen")
     doc.build(story)
     return path

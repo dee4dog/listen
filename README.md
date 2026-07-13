@@ -1,4 +1,4 @@
-# MeetScribe
+# Listen
 
 An offline Windows desktop app that records and transcribes speech (English,
 Afrikaans and 90+ other languages), separates speakers, recognises voices it
@@ -7,7 +7,8 @@ flags recurring issues across sessions, translates speech to English, and
 exports to PDF, Word or Excel.
 
 Everything runs locally on your PC — no cloud account, no API keys, and your
-recordings never leave your machine.
+recordings never leave your machine (unless you choose to push sessions to
+your own central server on the local network).
 
 ## Features
 
@@ -39,6 +40,9 @@ recordings never leave your machine.
   *Clear* resets both filters.
 - **Export** to **PDF**, **Word (.docx)** or **Excel (.xlsx)** (Excel includes
   Summary, Transcript and Speakers sheets).
+- **Central database**: push finished sessions to a shared server on your
+  local network so several PCs can collect their transcripts in one place —
+  see [Central server](#central-server-shared-database-on-your-network).
 - **Afrikaans understood and translated** — transcription, summaries, name
   deduction and English translation all work for Afrikaans; see the
   [Afrikaans support](#afrikaans-support) section below.
@@ -47,10 +51,10 @@ recordings never leave your machine.
 
 A meeting "bot" that joins a call by invitation requires cloud infrastructure
 (an Azure-registered Teams bot or the Google Meet API plus servers), which a
-local desktop app cannot provide. MeetScribe uses the standard desktop
+local desktop app cannot provide. Listen uses the standard desktop
 approach instead: it captures **your microphone and the system audio** (what
 your speakers/headphones play) at the same time. Join the Teams or Meet call
-on this PC, press Record in MeetScribe, and both you and all remote
+on this PC, press Record in Listen, and both you and all remote
 participants are recorded and transcribed — no bot, no plugins, works with any
 meeting software. (If you later want a true invite-a-bot participant, services
 such as Recall.ai or Fireflies provide that as a cloud API.)
@@ -60,7 +64,7 @@ such as Recall.ai or Fireflies provide that as a cloud API.)
 
 ## Afrikaans support
 
-MeetScribe understands Afrikaans end to end:
+Listen understands Afrikaans end to end:
 
 - **Transcription** — the Whisper speech engine supports Afrikaans natively.
   Leave **Language** on `auto` in Settings and it is detected automatically,
@@ -91,6 +95,44 @@ Mixed English/Afrikaans meetings work too: with Language on `auto` Whisper
 follows the dominant language, and the summary keywords are recognised in
 both languages at once.
 
+## Central server (shared database on your network)
+
+Listen can push finished sessions — transcript, speakers, and the analysed
+summary — to a central database hosted on a machine on your local network,
+so transcripts from several PCs end up in one place.
+
+**On the host machine** (any PC/server with Python 3, no packages needed —
+copy just the one file if you like):
+
+```powershell
+python server\central_server.py                    # port 8765, listen_central.db
+python server\central_server.py --port 9000 --db D:\data\central.db
+python server\central_server.py --api-key mysecret # require a key from clients
+```
+
+All pushed sessions are stored in a single SQLite file
+(`listen_central.db` by default) next to the script.
+
+**On each desktop PC**: open **Settings → Central server** and enter the
+server's URL, e.g. `http://192.168.1.10:8765` (plus the API key if the server
+uses one). Then select any session and click **Push to server** in the
+toolbar. Pushing the same session again after edits **updates** the central
+copy rather than duplicating it, and the local session remembers when it was
+last pushed.
+
+The server also answers simple read requests, so other tools can consume the
+central data:
+
+```
+GET /health              server alive check
+GET /api/sessions        list of all stored sessions
+GET /api/sessions/<id>   one full session incl. transcript and summary items
+```
+
+> The server is meant for a trusted local network. If you need it reachable
+> beyond that, put it behind a proper reverse proxy with HTTPS and use
+> `--api-key`.
+
 ## Setup
 
 Requirements: Windows 10/11, Python 3.10+ (`py` launcher), ~4 GB free disk
@@ -105,7 +147,7 @@ Notes:
 - The first transcription downloads the Whisper model (~500 MB for "small")
   and the speaker-embedding model (~80 MB). Later runs are fully offline.
 - Everything (database, recordings, models, exports) is stored under
-  `%LOCALAPPDATA%\MeetScribe`.
+  `%LOCALAPPDATA%\Listen`.
 
 ## Usage
 
@@ -118,7 +160,8 @@ Notes:
 4. Review the transcript (edit text or speaker cells as needed) and the
    summary panel below it; recurring issues are flagged in red.
 5. **Save changes** to persist edits and re-run the analysis.
-6. **Export PDF / Word / Excel**.
+6. **Export PDF / Word / Excel**, and/or **Push to server** to send the
+   session to your central database.
 
 ## Settings
 
@@ -131,6 +174,7 @@ Notes:
 - **Split sensitivity** — lower detects more speakers, higher merges them.
 - **Known-voice match threshold** — how confident a match must be before a
   saved speaker name is applied automatically.
+- **Central server URL / API key** — where *Push to server* sends sessions.
 - **Capture system audio by default** and **default discussion type**.
 
 ## Troubleshooting
@@ -144,5 +188,8 @@ Notes:
   Settings.
 - **Poor Afrikaans accuracy** — set Language to `af` explicitly and use the
   `small` model or larger (`medium` is best).
+- **Push to server fails** — check the server is running (`GET /health` in a
+  browser), the URL includes `http://` and the right port, Windows Firewall
+  allows the port on the host, and the API key matches.
 - **Antivirus/SmartScreen warnings during setup** — the PyTorch download is
   large; allow it to finish.

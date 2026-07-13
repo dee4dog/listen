@@ -143,6 +143,20 @@ class SettingsDialog(QDialog):
         form2.addRow("Known-voice match threshold:", self.match_threshold)
         outer.addWidget(speakers)
 
+        server = QGroupBox("Central server (optional)")
+        form_srv = QFormLayout(server)
+        self.server_url = QLineEdit(settings.get("server_url", ""))
+        self.server_url.setPlaceholderText("http://192.168.1.10:8765")
+        self.server_url.setToolTip(
+            "URL of a Listen central server on your network\n"
+            "(run server/central_server.py on the host machine).\n"
+            "Leave empty if you don't use a central database.")
+        form_srv.addRow("Server URL:", self.server_url)
+        self.api_key = QLineEdit(settings.get("api_key", ""))
+        self.api_key.setPlaceholderText("only if the server was started with --api-key")
+        form_srv.addRow("API key:", self.api_key)
+        outer.addWidget(server)
+
         recording = QGroupBox("Recording")
         form3 = QFormLayout(recording)
         self.sys_audio = QCheckBox("Capture system audio by default (for Teams / Meet)")
@@ -172,4 +186,6 @@ class SettingsDialog(QDialog):
             "match_threshold": round(self.match_threshold.value(), 2),
             "system_audio": self.sys_audio.isChecked(),
             "default_dtype": self.default_dtype.currentData(),
+            "server_url": self.server_url.text().strip(),
+            "api_key": self.api_key.text().strip(),
         }

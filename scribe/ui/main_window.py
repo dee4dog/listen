@@ -1,4 +1,4 @@
-"""MeetScribe main window."""
+"""Listen main window."""
 import html
 import traceback
 from datetime import datetime
@@ -29,12 +29,33 @@ DEFAULT_SETTINGS = {
     "match_threshold": 0.70,
     "system_audio": True,
     "default_dtype": "meeting",
+    "server_url": "",
+    "api_key": "",
 }
 
 AUDIO_FILTER = "Audio files (*.wav *.mp3 *.m4a *.mp4 *.flac *.ogg *.wma *.aac *.webm);;All files (*.*)"
 
 _SPEAKER_COLORS = ["#1f6feb", "#9a3fb0", "#0f7b4b", "#b35900", "#b30000",
                    "#00707a", "#6d4c00", "#5145cd"]
+
+
+class PushWorker(QThread):
+    done = Signal(dict)
+    failed = Signal(str)
+
+    def __init__(self, session, server_url, api_key):
+        super().__init__()
+        self.session = session
+        self.server_url = server_url
+        self.api_key = api_key
+
+    def run(self):
+        try:
+            from ..sync import push_session
+            reply = push_session(self.session, self.server_url, self.api_key)
+            self.done.emit(reply)
+        except Exception as exc:
+            self.failed.emit(str(exc))
 
 
 class PipelineWorker(QThread):
@@ -71,6 +92,7 @@ class MainWindow(QMainWindow):
         self.session = None
         self.recorder = None
         self.worker = None
+        self.push_worker = None
         self._record_meta = None
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
@@ -108,6 +130,11 @@ class MainWindow(QMainWindow):
         self.export_docx_action.triggered.connect(lambda: self.on_export("docx"))
         self.export_xlsx_action = QAction("Export Excel", self)
         self.export_xlsx_action.triggered.connect(lambda: self.on_export("xlsx"))
+        self.push_action = QAction("Push to server", self)
+        self.push_action.setToolTip(
+            "Send this session (transcript + summary) to the central "
+            "database server configured in Settings")
+        self.push_action.triggered.connect(self.on_push)
         self.delete_action = QAction("Delete session", self)
         self.delete_action.triggered.connect(self.on_delete_session)
         self.settings_action = QAction("Settings…", self)
@@ -124,6 +151,7 @@ class MainWindow(QMainWindow):
                        self.export_xlsx_action):
             toolbar.addAction(action)
         toolbar.addSeparator()
+        toolbar.addAction(self.push_action)
         toolbar.addAction(self.delete_action)
         toolbar.addAction(self.settings_action)
 
@@ -192,10 +220,12 @@ class MainWindow(QMainWindow):
         self.record_action.setEnabled(not busy and not recording)
         self.stop_action.setEnabled(recording)
         self.import_action.setEnabled(not busy and not recording)
+        pushing = self.push_worker is not None and self.push_worker.isRunning()
         for action in (self.rename_action, self.save_action, self.delete_action,
                        self.export_pdf_action, self.export_docx_action,
                        self.export_xlsx_action, self.translate_action):
             action.setEnabled(has_session and not busy)
+        self.push_action.setEnabled(has_session and not busy and not pushing)
 
     # ------------------------------------------------------------ recording
 
@@ -572,6 +602,47 @@ class MainWindow(QMainWindow):
             return
         note = " (filtered)" if self._filters_active() else ""
         self.statusBar().showMessage(f"Exported{note} to {path}")
+
+    # ----------------------------------------------------------- server push
+
+    def on_push(self):
+        if self.session is None:
+            return
+        server_url = self.settings.get("server_url", "").strip()
+        if not server_url:
+            QMessageBox.information(
+                self, APP_NAME,
+                "No central server is configured yet.\n\n"
+                "Open Settings and enter the Central server URL "
+                "(run server/central_server.py on the host machine first).")
+            return
+        self._collect_table()
+        db.save_session(self.database, self.session)
+        self.push_worker = PushWorker(self.session, server_url,
+                                      self.settings.get("api_key", ""))
+        self.push_worker.done.connect(self._push_done)
+        self.push_worker.failed.connect(self._push_failed)
+        self.push_worker.start()
+        self.statusBar().showMessage(f"Pushing to {server_url}…")
+        self._update_actions()
+
+    def _push_done(self, reply):
+        self.push_worker = None
+        if self.session is not None and self.session.id is not None:
+            db.mark_synced(self.database, self.session.id)
+        self.statusBar().showMessage(
+            f"Pushed to central server (server id {reply.get('server_id', '?')}).")
+        self._update_actions()
+
+    def _push_failed(self, message):
+        self.push_worker = None
+        self.statusBar().showMessage("Push to server failed.")
+        self._update_actions()
+        QMessageBox.warning(
+            self, APP_NAME,
+            f"Could not push to the central server:\n{message}\n\n"
+            "Check that the server is running and the URL/API key in "
+            "Settings are correct.")
 
     # ------------------------------------------------------------- settings
 
