@@ -1,3 +1,5 @@
+<img width="1774" height="887" alt="ChatGPT Image Jul 13, 2026, 06_28_13 PM" src="https://github.com/user-attachments/assets/6ebfd737-358e-4deb-9b3b-77124c390e7e" />
+
 # Listen
 
 An offline Windows desktop app that records and transcribes speech (English,
