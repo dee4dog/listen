@@ -2,6 +2,7 @@
 
 # Listen
 
+This app is part of the AIBE Programme. Presented by Akheel Khan (Founder, An Architect, Co-founder Institute of Building Design)
 An offline Windows desktop app that records and transcribes speech (English,
 Afrikaans and 90+ other languages), separates speakers, recognises voices it
 has heard before, extracts action items and key issues per discussion type,
