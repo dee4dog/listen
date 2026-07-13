@@ -9,7 +9,7 @@ if (-not (Test-Path .venv)) {
 
 Write-Host "Installing dependencies (this downloads PyTorch and may take a while)..."
 .\.venv\Scripts\python -m pip install --upgrade pip
-.\.venv\Scripts\pip install -r requirements.txt
+.\.venv\Scripts\python -m pip install -r requirements.txt
 
 Write-Host ""
 Write-Host "Setup complete. Start the app with: .\scripts\run.ps1"
