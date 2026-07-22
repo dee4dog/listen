@@ -141,6 +141,20 @@ GET /api/sessions/<id>   one full session incl. transcript and summary items
 
 ## Setup
 
+### Option A — Installer (recommended for most users)
+
+Download **`Listen-Setup-<version>.exe`** from the
+[Releases](https://github.com/dee4dog/listen/releases) page and run it. The
+installer bundles Python and every dependency, so **no Python install and no
+`pip` is required** — just install and launch Listen from the Start Menu (or
+the desktop icon, if you ticked that during setup). Uninstall via
+*Settings → Apps* like any other Windows program.
+
+Requirements: Windows 10/11 (64-bit), ~4 GB free disk space for the app and
+downloaded models.
+
+### Option B — Run from source (for development)
+
 Requirements: Windows 10/11, Python 3.10+ (`py` launcher), ~4 GB free disk
 space for dependencies and models.
 
@@ -149,11 +163,28 @@ space for dependencies and models.
 .\scripts\run.ps1       # starts the app
 ```
 
-Notes:
+### Notes
+
 - The first transcription downloads the Whisper model (~500 MB for "small")
   and the speaker-embedding model (~80 MB). Later runs are fully offline.
+  This applies to both setup options.
 - Everything (database, recordings, models, exports) is stored under
-  `%LOCALAPPDATA%\Listen`.
+  `%LOCALAPPDATA%\Listen`. Your data lives here regardless of how you
+  installed, and it survives uninstalling/reinstalling the app.
+
+### Building the installer yourself
+
+To produce the `Listen-Setup-<version>.exe` from source you need
+[Inno Setup 6](https://jrsoftware.org/isdl.php)
+(`winget install JRSoftware.InnoSetup`). Then, after running
+`.\scripts\setup.ps1` once:
+
+```powershell
+.\scripts\build_installer.ps1
+```
+
+This freezes the app with PyInstaller and compiles the installer into
+`dist_installer\`. Bump `AppVersion` in `scripts\installer.iss` per release.
 
 ## Usage
 
