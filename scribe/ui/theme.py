@@ -8,12 +8,18 @@ app title use the most grunge-like handwritten TrueType font installed
 Module-level colour names (BG, TEXT, ACCENT, …) always reflect the active
 mode; call apply_theme(app, mode) to switch.
 """
+import sys
 from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QIcon, QPainter, QPixmap
 
-ASSETS = Path(__file__).resolve().parents[2] / "assets"
+if getattr(sys, "frozen", False):
+    # Running from a PyInstaller bundle: assets are bundled alongside the
+    # app under sys._MEIPASS rather than two directories above this file.
+    ASSETS = Path(sys._MEIPASS) / "assets"
+else:
+    ASSETS = Path(__file__).resolve().parents[2] / "assets"
 
 _DARK = {
     "BG": "#15161c",           # window background
