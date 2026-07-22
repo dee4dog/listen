@@ -2,6 +2,9 @@
 
 # Listen
 
+> **Status: pre-alpha — v0.1.0.** Under active testing. Expect rough edges,
+> and expect breaking changes between releases until 1.0.
+
 This app is part of the AIBE Programme. Presented by Akheel Khan (Founder, An Architect, Co-founder Institute of Building Design) Submission by Dirk Cilliers to solve a particular problem using first principle thinking. The app is a pre alpha and still needs major testing.
 It Is an offline Windows desktop app that records and transcribes speech (English,
 Afrikaans and 90+ other languages), separates speakers, recognises voices it

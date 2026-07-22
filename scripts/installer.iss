@@ -7,7 +7,7 @@
 ;   iscc scripts\installer.iss
 
 #define AppName "Listen"
-#define AppVersion "1.0.0"
+#define AppVersion "0.1.0"
 #define AppPublisher "Dirk Cilliers"
 #define AppExeName "Listen.exe"
 #define SourceDir "..\dist\Listen"
