@@ -5,13 +5,13 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QAction, QColor
+from PySide6.QtGui import QAction, QColor, QKeySequence
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFileDialog, QHBoxLayout, QHeaderView,
     QInputDialog, QLabel, QListWidget, QListWidgetItem, QMainWindow, QMenu,
-    QMessageBox, QProgressBar, QPushButton, QSplitter, QStyledItemDelegate,
-    QTableWidget, QTableWidgetItem, QTextBrowser, QToolBar, QVBoxLayout,
-    QWidget,
+    QMessageBox, QProgressBar, QPushButton, QSizePolicy, QSplitter,
+    QStackedWidget, QStyledItemDelegate, QTableWidget, QTableWidgetItem,
+    QTextBrowser, QToolBar, QToolButton, QVBoxLayout, QWidget,
 )
 
 from .. import APP_NAME, data_dir, db, db_path
@@ -22,7 +22,7 @@ from ..audio.recorder import Recorder
 from ..models import Segment, Session, fmt_ts
 from ..pipeline import merge_sessions, run_pipeline
 from .dialogs import (ContinueDialog, NewSessionDialog, SettingsDialog,
-                      SpeakerNameDialog)
+                      SpeakerNameDialog, TemplateHelpDialog)
 from . import theme
 
 DEFAULT_SETTINGS = {
@@ -36,9 +36,11 @@ DEFAULT_SETTINGS = {
     "server_url": "",
     "api_key": "",
     "theme": "dark",
+    "template_path": "",
 }
 
 AUDIO_FILTER = "Audio files (*.wav *.mp3 *.m4a *.mp4 *.flac *.ogg *.wma *.aac *.webm);;All files (*.*)"
+DOCX_FILTER = "Word document (*.docx)"
 
 
 class SpeakerDelegate(QStyledItemDelegate):
@@ -120,6 +122,7 @@ class MainWindow(QMainWindow):
         self.session = None
         self.recorder = None
         self.worker = None
+        self._dirty = False        # transcript edited but not saved yet
         self.push_worker = None
         self.player = SegmentPlayer()
         self._merge_into = None
@@ -134,59 +137,156 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ UI
 
-    def _build_ui(self):
+    def _build_actions(self):
+        """Every command the app offers, defined once. The toolbar carries
+        only the few used on every session; the rest live in the menus."""
+        def make(text, slot, tip=None, shortcut=None):
+            action = QAction(text, self)
+            action.triggered.connect(slot)
+            if tip:
+                action.setToolTip(tip)
+                action.setStatusTip(tip)
+            if shortcut:
+                action.setShortcut(QKeySequence(shortcut))
+            return action
+
+        self.record_action = make(
+            "● Record", self.on_record,
+            "Record this PC's microphone, and optionally the meeting audio "
+            "it is playing", "Ctrl+R")
+        self.stop_action = make(
+            "■ Stop", self.on_stop, "Stop recording and start transcribing",
+            "Ctrl+.")
+        self.stop_action.setEnabled(False)
+        self.import_action = make(
+            "Import audio…", self.on_import,
+            "Transcribe an audio file you already have", "Ctrl+O")
+        self.rename_action = make(
+            "Name the speakers…", self.on_rename_speakers,
+            "Put real names to Speaker 1, 2, 3 — and remember their voices")
+        self.save_action = make(
+            "Save changes", self.on_save_changes,
+            "Save your edits to the transcript and work out the summary again",
+            "Ctrl+S")
+        self.translate_action = make(
+            "Translate to English…", self.on_translate,
+            "Re-process this session's audio into an English transcript, "
+            "saved as a new session")
+        self.export_pdf_action = make(
+            "PDF…", lambda: self.on_export("pdf"), "Export as a PDF")
+        self.export_docx_action = make(
+            "Word…", lambda: self.on_export("docx"),
+            "Export as a Word document in the built-in layout")
+        self.export_template_action = make(
+            "Word, using my template…", lambda: self.on_export("template"),
+            "Export as a Word document laid out by your own template file",
+            "Ctrl+E")
+        self.export_xlsx_action = make(
+            "Excel…", lambda: self.on_export("xlsx"),
+            "Export as an Excel workbook")
+        self.choose_template_action = make(
+            "Choose my Word template…", self.on_choose_template,
+            "Pick the .docx file Listen should export into")
+        self.create_template_action = make(
+            "Create a starter template…", self.on_create_template,
+            "Save a ready-made template you can restyle in Word")
+        self.template_help_action = make(
+            "How Word templates work…", self.on_template_help,
+            "What a template is, and every field you can put in one")
+        self.push_action = make(
+            "Send to the shared database", self.on_push,
+            "Send this session to the central server set up in Settings")
+        self.delete_action = make(
+            "Delete this session…", self.on_delete_session,
+            "Remove this session and its transcript from your PC")
+        self.settings_action = make(
+            "Settings…", self.on_settings, "Accuracy, language, template, "
+            "recording and shared-database options")
+        self.theme_action = make(
+            "Switch light / dark", self.on_toggle_theme, None, "Ctrl+T")
+        self.help_action = make(
+            "Getting started", self.on_help, "A short walkthrough", "F1")
+        self.quit_action = make("Exit", self.close, None, "Ctrl+Q")
+
+    def _build_menus(self):
+        bar = self.menuBar()
+
+        session_menu = bar.addMenu("&Session")
+        session_menu.addAction(self.record_action)
+        session_menu.addAction(self.stop_action)
+        session_menu.addAction(self.import_action)
+        session_menu.addSeparator()
+        session_menu.addAction(self.delete_action)
+        session_menu.addSeparator()
+        session_menu.addAction(self.quit_action)
+
+        transcript_menu = bar.addMenu("&Transcript")
+        transcript_menu.addAction(self.rename_action)
+        transcript_menu.addAction(self.save_action)
+        transcript_menu.addSeparator()
+        transcript_menu.addAction(self.translate_action)
+
+        self.export_menu = bar.addMenu("&Export")
+        self._fill_export_menu(self.export_menu)
+        self.export_menu.addSeparator()
+        self.export_menu.addAction(self.push_action)
+
+        template_menu = bar.addMenu("&Word template")
+        template_menu.addAction(self.template_help_action)
+        template_menu.addSeparator()
+        template_menu.addAction(self.create_template_action)
+        template_menu.addAction(self.choose_template_action)
+        template_menu.addAction(self.export_template_action)
+
+        view_menu = bar.addMenu("&View")
+        view_menu.addAction(self.theme_action)
+        view_menu.addAction(self.settings_action)
+
+        help_menu = bar.addMenu("&Help")
+        help_menu.addAction(self.help_action)
+        help_menu.addAction(self.template_help_action)
+
+    def _fill_export_menu(self, menu):
+        menu.addAction(self.export_pdf_action)
+        menu.addAction(self.export_docx_action)
+        menu.addAction(self.export_template_action)
+        menu.addAction(self.export_xlsx_action)
+
+    def _build_toolbar(self):
+        """Only what is needed on a typical session: record or import, fix the
+        speakers, save, export. Everything else is a menu away."""
         toolbar = QToolBar("Main")
         toolbar.setMovable(False)
+        toolbar.setToolButtonStyle(Qt.ToolButtonTextOnly)
         self.addToolBar(toolbar)
 
-        self.record_action = QAction("● Record", self)
-        self.record_action.triggered.connect(self.on_record)
-        self.stop_action = QAction("■ Stop", self)
-        self.stop_action.triggered.connect(self.on_stop)
-        self.stop_action.setEnabled(False)
-        self.import_action = QAction("Import audio…", self)
-        self.import_action.triggered.connect(self.on_import)
-        self.rename_action = QAction("Name speakers…", self)
-        self.rename_action.triggered.connect(self.on_rename_speakers)
-        self.save_action = QAction("Save changes", self)
-        self.save_action.setToolTip(
-            "Save edits to the transcript and re-run the analysis")
-        self.save_action.triggered.connect(self.on_save_changes)
-        self.translate_action = QAction("Translate to English", self)
-        self.translate_action.setToolTip(
-            "Re-process this session's audio, translating the speech "
-            "(e.g. Afrikaans) into an English transcript as a new session")
-        self.translate_action.triggered.connect(self.on_translate)
-        self.export_pdf_action = QAction("Export PDF", self)
-        self.export_pdf_action.triggered.connect(lambda: self.on_export("pdf"))
-        self.export_docx_action = QAction("Export Word", self)
-        self.export_docx_action.triggered.connect(lambda: self.on_export("docx"))
-        self.export_xlsx_action = QAction("Export Excel", self)
-        self.export_xlsx_action.triggered.connect(lambda: self.on_export("xlsx"))
-        self.push_action = QAction("Push to server", self)
-        self.push_action.setToolTip(
-            "Send this session (transcript + summary) to the central "
-            "database server configured in Settings")
-        self.push_action.triggered.connect(self.on_push)
-        self.delete_action = QAction("Delete session", self)
-        self.delete_action.triggered.connect(self.on_delete_session)
-        self.settings_action = QAction("Settings…", self)
-        self.settings_action.triggered.connect(self.on_settings)
+        toolbar.addAction(self.record_action)
+        toolbar.addAction(self.stop_action)
+        toolbar.addAction(self.import_action)
+        toolbar.addSeparator()
+        toolbar.addAction(self.rename_action)
+        toolbar.addAction(self.save_action)
+        toolbar.addSeparator()
 
-        for action in (self.record_action, self.stop_action, self.import_action):
-            toolbar.addAction(action)
-        toolbar.addSeparator()
-        for action in (self.rename_action, self.save_action,
-                       self.translate_action):
-            toolbar.addAction(action)
-        toolbar.addSeparator()
-        for action in (self.export_pdf_action, self.export_docx_action,
-                       self.export_xlsx_action):
-            toolbar.addAction(action)
-        toolbar.addSeparator()
-        toolbar.addAction(self.push_action)
-        toolbar.addAction(self.delete_action)
+        # One Export button instead of three, so the formats stay together.
+        self.export_button = QToolButton()
+        self.export_button.setText("Export ▾")
+        self.export_button.setToolTip("Save this session as a document")
+        self.export_button.setPopupMode(QToolButton.InstantPopup)
+        button_menu = QMenu(self.export_button)
+        self._fill_export_menu(button_menu)
+        self.export_button.setMenu(button_menu)
+        toolbar.addWidget(self.export_button)
+
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        toolbar.addWidget(spacer)
         toolbar.addAction(self.settings_action)
+
+    def _build_ui(self):
+        self._build_actions()
+        self._build_menus()
+        self._build_toolbar()
 
         self.session_list = QListWidget()
         self.session_list.itemSelectionChanged.connect(self.on_session_selected)
@@ -205,8 +305,14 @@ class MainWindow(QMainWindow):
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(6)
+        self.sessions_caption = QLabel("Your recordings")
+        self.sessions_caption.setStyleSheet(
+            f"color: {theme.MUTED}; padding: 8px 10px 0 10px; "
+            f"font-weight: 600; background: {theme.PANEL};")
+
         left_layout.addWidget(self.logo_label)
         left_layout.addWidget(self.theme_btn, alignment=Qt.AlignHCenter)
+        left_layout.addWidget(self.sessions_caption)
         left_layout.addWidget(self.session_list)
         left_panel.setMaximumWidth(320)
 
@@ -221,6 +327,7 @@ class MainWindow(QMainWindow):
         self.table.setAlternatingRowColors(True)
         self.table.setShowGrid(False)
         self.table.cellClicked.connect(self.on_table_cell_clicked)
+        self.table.itemChanged.connect(self._on_table_edited)
         self.table.setItemDelegateForColumn(1, SpeakerDelegate(self))
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.on_table_menu)
@@ -261,9 +368,15 @@ class MainWindow(QMainWindow):
         right.addWidget(self.summary)
         right.setSizes([500, 280])
 
+        # Page 0 explains what to do; page 1 is the session itself. A blank
+        # window on first launch is the quickest way to lose a new user.
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self._welcome_page())
+        self.stack.addWidget(right)
+
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(left_panel)
-        splitter.addWidget(right)
+        splitter.addWidget(self.stack)
         splitter.setSizes([280, 920])
         self.setCentralWidget(splitter)
 
@@ -281,6 +394,185 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Ready")
         self._update_actions()
 
+    def _welcome_page(self):
+        """The first thing a new user sees, instead of an empty window."""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.welcome_view = QTextBrowser()
+        self.welcome_view.setOpenExternalLinks(False)
+        self.welcome_view.setFrameShape(QTextBrowser.NoFrame)
+        layout.addWidget(self.welcome_view)
+        self._refresh_welcome()
+        return page
+
+    def _refresh_welcome(self):
+        """Rebuild the welcome text — also on a theme change, so its colours
+        follow the rest of the window."""
+        grunge = theme.grunge_font_family()
+        template = self.settings.get("template_path", "")
+        template_line = (
+            f"Word exports use your template: <b>{html.escape(Path(template).name)}</b>."
+            if template else
+            "Want exports on your own letterhead? "
+            "<b>Word template &rarr; How Word templates work…</b>")
+        self.welcome_view.setHtml(f"""
+<div style="padding:34px 44px">
+  <h1 style="font-family:'{grunge}'; color:{theme.ACCENT}; letter-spacing:2px;
+             margin-bottom:2px">Welcome to {APP_NAME}</h1>
+  <p style="color:{theme.MUTED}; font-size:11pt; margin-top:0">
+    Records a conversation, writes down who said what, and pulls out the
+    action items. Everything happens on this PC — nothing is uploaded.</p>
+
+  <h2 style="font-family:'{grunge}'; color:{theme.ACCENT_SOFT};
+             letter-spacing:1px; margin-top:26px">Three steps</h2>
+  <p style="font-size:11pt; line-height:150%">
+    <b style="color:{theme.INFO}">1.</b>&nbsp; Press <b>● Record</b> to capture
+    this room and any Teams or Meet call playing on this PC — or
+    <b>Import audio…</b> for a file you already have.<br>
+    <b style="color:{theme.INFO}">2.</b>&nbsp; When it finishes, put real names
+    to Speaker&nbsp;1, 2 and 3. Tick <i>Remember voice</i> and {APP_NAME} will
+    know them next time.<br>
+    <b style="color:{theme.INFO}">3.</b>&nbsp; Read the summary, correct
+    anything that is wrong, press <b>Save changes</b>, then <b>Export</b>.</p>
+
+  <p style="color:{theme.MUTED}; margin-top:26px; line-height:150%">
+    {template_line}<br>
+    The first recording downloads the speech model, so it takes a few minutes
+    longer than the ones after it.<br>
+    Press <b>F1</b> at any time for this again.</p>
+
+  <p style="color:{theme.WARN}; margin-top:22px">
+    ⚠ Tell people they are being recorded — in many places that is the law.</p>
+</div>""")
+
+    def _show_welcome(self):
+        self._refresh_welcome()
+        self.stack.setCurrentIndex(0)
+
+    # ------------------------------------------------------- unsaved edits
+
+    def _on_table_edited(self, _item):
+        """Any edit to a Speaker or Text cell. Repopulating the table blocks
+        this signal, so it only fires for edits the user actually made."""
+        if self.session is not None:
+            self._mark_dirty()
+
+    def _mark_dirty(self):
+        if self._dirty:
+            return
+        self._dirty = True
+        self.save_action.setText("Save changes •")
+        self._update_title()
+        self.statusBar().showMessage(
+            "Edited — press Save changes (Ctrl+S) to keep it.")
+
+    def _mark_clean(self):
+        self._dirty = False
+        self.save_action.setText("Save changes")
+        self._update_title()
+
+    def _update_title(self):
+        """The window title names the open session, with a dot while it has
+        unsaved edits."""
+        if self.session is None:
+            self.setWindowTitle(APP_NAME)
+            return
+        mark = " •" if self._dirty else ""
+        self.setWindowTitle(f"{self.session.title}{mark} — {APP_NAME}")
+
+    def _confirm_discard(self, what):
+        """Ask before anything that would throw transcript edits away.
+        Returns False if the user would rather stay where they are."""
+        if not self._dirty or self.session is None:
+            return True
+        answer = QMessageBox.warning(
+            self, APP_NAME,
+            f"You have unsaved changes to “{self.session.title}”.\n\n"
+            f"Save them before {what}?",
+            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+            QMessageBox.Save)
+        if answer == QMessageBox.Cancel:
+            return False
+        if answer == QMessageBox.Save:
+            self.on_save_changes()
+        else:
+            self._mark_clean()
+        return True
+
+    def _reselect_current_session(self):
+        """Put the highlight back on the open session after the user cancels
+        a switch, so the list never disagrees with what is on screen."""
+        self.session_list.blockSignals(True)
+        self.session_list.clearSelection()
+        if self.session is not None:
+            for row in range(self.session_list.count()):
+                item = self.session_list.item(row)
+                if item.data(Qt.UserRole) == self.session.id:
+                    item.setSelected(True)
+                    self.session_list.setCurrentItem(item)
+                    break
+        self.session_list.blockSignals(False)
+
+    def _confirm_recording_close(self):
+        """Closing mid-recording would bin the audio, which is the one thing
+        here that cannot be redone. Offer to keep it as a file instead."""
+        if self.recorder is None:
+            return True
+        title = self._record_meta[0] if self._record_meta else "This recording"
+        answer = QMessageBox.warning(
+            self, APP_NAME,
+            f"“{title}” is still recording.\n\n"
+            f"Save keeps the audio as a file you can transcribe later with "
+            f"Import audio…\n"
+            f"Discard throws the audio away.\n"
+            f"Cancel carries on recording.",
+            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+            QMessageBox.Cancel)
+        if answer == QMessageBox.Cancel:
+            return False
+
+        self._stop_recording_ui()
+        recorder, self.recorder = self.recorder, None
+        self._update_actions()   # in case a later prompt cancels the close
+        if answer == QMessageBox.Discard:
+            recorder.discard()
+            return True
+
+        out = data_dir() / "recordings" / f"rec_{datetime.now():%Y%m%d_%H%M%S}.wav"
+        try:
+            recorder.stop(out)
+        except Exception as exc:
+            # The capture threads have already stopped, so there is nothing
+            # left to go back to — say what happened and let the close finish.
+            QMessageBox.critical(
+                self, APP_NAME, f"The recording could not be saved:\n{exc}")
+            return True
+        QMessageBox.information(
+            self, APP_NAME,
+            f"The recording was saved to:\n{out}\n\n"
+            f"Start {APP_NAME} again and use Import audio… to transcribe it.")
+        return True
+
+    def _confirm_processing_close(self):
+        if self.worker is None or not self.worker.isRunning():
+            return True
+        answer = QMessageBox.warning(
+            self, APP_NAME,
+            "A recording is still being transcribed.\n\n"
+            "Closing now abandons that work. The audio file is kept, so you "
+            "can import it again later.\n\nClose anyway?",
+            QMessageBox.Close | QMessageBox.Cancel, QMessageBox.Cancel)
+        return answer == QMessageBox.Close
+
+    def closeEvent(self, event):
+        if (self._confirm_recording_close()
+                and self._confirm_processing_close()
+                and self._confirm_discard(f"closing {APP_NAME}")):
+            event.accept()
+        else:
+            event.ignore()
+
     def _update_actions(self):
         busy = self.worker is not None and self.worker.isRunning()
         recording = self.recorder is not None
@@ -291,13 +583,17 @@ class MainWindow(QMainWindow):
         pushing = self.push_worker is not None and self.push_worker.isRunning()
         for action in (self.rename_action, self.save_action, self.delete_action,
                        self.export_pdf_action, self.export_docx_action,
-                       self.export_xlsx_action, self.translate_action):
+                       self.export_template_action, self.export_xlsx_action,
+                       self.translate_action):
             action.setEnabled(has_session and not busy)
+        self.export_button.setEnabled(has_session and not busy)
         self.push_action.setEnabled(has_session and not busy and not pushing)
 
     # ------------------------------------------------------------ recording
 
     def on_record(self):
+        if not self._confirm_discard("starting a new recording"):
+            return
         self._merge_into = None
         sessions = db.list_sessions(self.database)
         if sessions:
@@ -358,14 +654,18 @@ class MainWindow(QMainWindow):
             base = self.statusBar().currentMessage().rsplit(" ", 1)[0]
             self.statusBar().showMessage(f"{base} {fmt_ts(self.recorder.elapsed())}")
 
-    def on_stop(self):
-        if not self.recorder:
-            return
+    def _stop_recording_ui(self):
+        """Put the timer and level meter away once capture has ended."""
         self._timer.stop()
         self._level_timer.stop()
         self.level_label.hide()
         self.level_bar.hide()
         self.level_bar.setValue(0)
+
+    def on_stop(self):
+        if not self.recorder:
+            return
+        self._stop_recording_ui()
         out = data_dir() / "recordings" / f"rec_{datetime.now():%Y%m%d_%H%M%S}.wav"
         recorder, self.recorder = self.recorder, None
         try:
@@ -381,6 +681,8 @@ class MainWindow(QMainWindow):
     # -------------------------------------------------------------- import
 
     def on_import(self):
+        if not self._confirm_discard("importing another recording"):
+            return
         self._merge_into = None
         path, _ = QFileDialog.getOpenFileName(self, "Import audio", "", AUDIO_FILTER)
         if not path:
@@ -422,6 +724,7 @@ class MainWindow(QMainWindow):
                     f"saving as a separate session instead.")
         self.session = session
         db.save_session(self.database, session)
+        self._mark_clean()
         self.refresh_sessions(select_id=session.id)
         self.show_session()
         self.statusBar().showMessage("Transcription complete.")
@@ -448,6 +751,12 @@ class MainWindow(QMainWindow):
             if select_id is not None and sid == select_id:
                 item.setSelected(True)
                 self.session_list.setCurrentItem(item)
+        if not self.session_list.count():
+            empty = QListWidgetItem(
+                "Nothing recorded yet.\nPress ● Record to start.")
+            empty.setFlags(Qt.NoItemFlags)
+            empty.setForeground(QColor(theme.MUTED))
+            self.session_list.addItem(empty)
         self.session_list.blockSignals(False)
 
     def on_session_selected(self):
@@ -455,13 +764,20 @@ class MainWindow(QMainWindow):
         if not items:
             return
         sid = items[0].data(Qt.UserRole)
+        if sid is None:
+            return
         if self.session is not None and self.session.id == sid:
+            self.show_session()   # e.g. coming back from the welcome page
+            return
+        if not self._confirm_discard("opening another recording"):
+            self._reselect_current_session()
             return
         try:
             self.session = db.load_session(self.database, sid)
         except Exception as exc:
             QMessageBox.critical(self, APP_NAME, f"Could not load session:\n{exc}")
             return
+        self._mark_clean()
         self.show_session()
         self._update_actions()
 
@@ -477,7 +793,9 @@ class MainWindow(QMainWindow):
         self.session = None
         self.table.setRowCount(0)
         self.summary.clear()
+        self._mark_clean()
         self.refresh_sessions()
+        self._show_welcome()
         self._update_actions()
 
     # ---------------------------------------------------------------- theme
@@ -494,7 +812,11 @@ class MainWindow(QMainWindow):
         db.save_settings(self.database, self.settings)
         theme.apply_theme(QApplication.instance(), mode)
         self._update_theme_button()
+        self._refresh_welcome()
         if self.session is not None:
+            # Keep any unsaved edits: show_session() repaints the table from
+            # the session, so pull the edits into it first.
+            self._collect_table()
             self.show_session()   # re-colour speakers, timestamps, summary
         self.statusBar().showMessage(f"{mode.capitalize()} theme applied.")
 
@@ -502,6 +824,7 @@ class MainWindow(QMainWindow):
 
     def show_session(self):
         session = self.session
+        self.stack.setCurrentIndex(1)
         self.table.blockSignals(True)
         self.table.setRowCount(len(session.segments))
         palette = theme.SPEAKER_COLORS
@@ -582,6 +905,7 @@ class MainWindow(QMainWindow):
         self._collect_table()
         self.session.segments[row].speaker = name
         db.save_session(self.database, self.session)
+        self._mark_clean()
         self.show_session()
         self.statusBar().showMessage(f"Line reassigned to {name}.")
 
@@ -605,6 +929,7 @@ class MainWindow(QMainWindow):
         if old in self.session.centroids:
             self.session.centroids[new] = self.session.centroids.pop(old)
         db.save_session(self.database, self.session)
+        self._mark_clean()
         self.show_session()
         self.statusBar().showMessage(f"“{old}” renamed to “{new}” everywhere.")
 
@@ -744,6 +1069,7 @@ class MainWindow(QMainWindow):
                                     exclude_session_id=self.session.id)
         self.session.issues = analyze(self.session.segments, prior_issues=prior)
         db.save_session(self.database, self.session)
+        self._mark_clean()
         self.show_session()
         self.statusBar().showMessage("Changes saved and analysis re-run.")
 
@@ -751,6 +1077,8 @@ class MainWindow(QMainWindow):
         """Re-process the current session's audio with Whisper's translate task,
         producing an English transcript as a new session."""
         if self.session is None:
+            return
+        if not self._confirm_discard("translating this session"):
             return
         audio = Path(self.session.audio_path) if self.session.audio_path else None
         if audio is None or not audio.exists():
@@ -796,6 +1124,7 @@ class MainWindow(QMainWindow):
                 if remember:
                     db.save_speaker(self.database, new, centroid)
         db.save_session(self.database, self.session)
+        self._mark_clean()
         self.refresh_sessions(select_id=self.session.id)
         self.show_session()
         self.statusBar().showMessage("Speakers updated.")
@@ -805,11 +1134,17 @@ class MainWindow(QMainWindow):
     def on_export(self, fmt):
         if self.session is None:
             return
+        template = None
+        if fmt == "template":
+            template = self._template_for_export()
+            if template is None:
+                return
         session = self._filtered_session()
         safe = "".join(c for c in session.title if c.isalnum() or c in " -_").strip()
-        default = str(data_dir() / "exports" / f"{safe or 'session'}.{fmt}")
-        filters = {"pdf": "PDF (*.pdf)", "docx": "Word document (*.docx)",
-                   "xlsx": "Excel workbook (*.xlsx)"}
+        suffix = "docx" if fmt == "template" else fmt
+        default = str(data_dir() / "exports" / f"{safe or 'session'}.{suffix}")
+        filters = {"pdf": "PDF (*.pdf)", "docx": DOCX_FILTER,
+                   "template": DOCX_FILTER, "xlsx": "Excel workbook (*.xlsx)"}
         path, _ = QFileDialog.getSaveFileName(self, "Export", default, filters[fmt])
         if not path:
             return
@@ -820,6 +1155,9 @@ class MainWindow(QMainWindow):
             elif fmt == "docx":
                 from ..exporters.docx_export import export_docx
                 export_docx(session, path)
+            elif fmt == "template":
+                from ..exporters.docx_template import export_docx_template
+                export_docx_template(session, template, path)
             else:
                 from ..exporters.xlsx_export import export_xlsx
                 export_xlsx(session, path)
@@ -828,6 +1166,120 @@ class MainWindow(QMainWindow):
             return
         note = " (filtered)" if self._filters_active() else ""
         self.statusBar().showMessage(f"Exported{note} to {path}")
+
+    # ----------------------------------------------------- word templates
+
+    def _template_for_export(self):
+        """The configured template, or None — after offering to set one up.
+        Nobody should hit a dead end here on their first try."""
+        path = self.settings.get("template_path", "").strip()
+        if path and Path(path).exists():
+            return Path(path)
+        if path:
+            answer = QMessageBox.question(
+                self, APP_NAME,
+                f"Your Word template is no longer at:\n{path}\n\n"
+                f"Choose a different one?")
+            if answer != QMessageBox.Yes:
+                return None
+            return Path(p) if (p := self.on_choose_template()) else None
+        QMessageBox.information(
+            self, APP_NAME,
+            "You have not set up a Word template yet.\n\n"
+            "A template is your own Word document — letterhead, fonts and "
+            "all — with fields such as {{title}} and {{transcript}} where "
+            "the content should go.")
+        self.on_template_help()
+        path = self.settings.get("template_path", "").strip()
+        return Path(path) if path and Path(path).exists() else None
+
+    def _set_template(self, path):
+        self.settings["template_path"] = str(path)
+        db.save_settings(self.database, self.settings)
+        self._refresh_welcome()
+        self.statusBar().showMessage(f"Word template set to {Path(path).name}")
+
+    def on_choose_template(self):
+        """Pick the .docx Listen exports into, and check it over first."""
+        start = (self.settings.get("template_path", "").strip()
+                 or str(Path.home()))
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose a Word template", start, DOCX_FILTER)
+        if not path:
+            return None
+        try:
+            from ..exporters.docx_template import scan_template
+            found, unknown = scan_template(path)
+        except Exception as exc:
+            QMessageBox.critical(
+                self, APP_NAME,
+                f"That file could not be read as a Word document:\n{exc}")
+            return None
+        if not found:
+            answer = QMessageBox.question(
+                self, APP_NAME,
+                f"“{Path(path).name}” contains no fields Listen recognises, "
+                f"so exports would come out with nothing filled in.\n\n"
+                f"Use it anyway?")
+            if answer != QMessageBox.Yes:
+                return None
+        elif unknown:
+            QMessageBox.warning(
+                self, APP_NAME,
+                "This template uses fields Listen does not recognise:\n\n"
+                + "\n".join(f"    {{{{{name}}}}}" for name in sorted(unknown))
+                + "\n\nThey will be left in the document as they are — most "
+                  "often that means a typo. See Word template → How Word "
+                  "templates work for the list of field names.")
+        self._set_template(path)
+        return path
+
+    def on_create_template(self):
+        """Write a starter template the user can restyle in Word."""
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save starter template",
+            str(Path.home() / f"{APP_NAME} template.docx"), DOCX_FILTER)
+        if not path:
+            return None
+        try:
+            from ..exporters.docx_template import write_starter_template
+            write_starter_template(path)
+        except Exception as exc:
+            QMessageBox.critical(
+                self, APP_NAME, f"The template could not be saved:\n{exc}")
+            return None
+        self._set_template(path)
+        QMessageBox.information(
+            self, APP_NAME,
+            f"Starter template saved to:\n{path}\n\n"
+            f"Listen will export into it from now on. Open it in Word, make "
+            f"it look the way you want, and keep the fields where you want "
+            f"that content to appear.")
+        return path
+
+    def on_template_help(self):
+        dialog = TemplateHelpDialog(
+            self, self.settings.get("template_path", "").strip())
+        dialog.exec()
+        if dialog.choice == "create":
+            self.on_create_template()
+        elif dialog.choice == "choose":
+            self.on_choose_template()
+        elif dialog.choice == "clear":
+            self.settings["template_path"] = ""
+            db.save_settings(self.database, self.settings)
+            self._refresh_welcome()
+            self.statusBar().showMessage(
+                "Word exports will use the built-in layout again.")
+
+    def on_help(self):
+        """F1 / Help → Getting started: the welcome page, on demand."""
+        if self.stack.currentIndex() == 0:
+            self._refresh_welcome()
+            return
+        self._show_welcome()
+        self.statusBar().showMessage(
+            "Pick a recording on the left to go back to it.")
 
     # ----------------------------------------------------------- server push
 
@@ -877,6 +1329,7 @@ class MainWindow(QMainWindow):
         if dialog.exec() == SettingsDialog.Accepted:
             self.settings.update(dialog.values())
             db.save_settings(self.database, self.settings)
+            self._refresh_welcome()   # it names the current template
             self.statusBar().showMessage("Settings saved.")
 
 

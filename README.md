@@ -21,8 +21,9 @@ your own central server on the local network).
 - **Record** from the laptop/desktop microphone, optionally mixed with
   **system audio** (everything the PC plays) — see the Teams/Meet section below.
 - **Import** existing audio files (wav, mp3, m4a, mp4, flac, ogg, and more).
-- **Transcription** with OpenAI Whisper (via `faster-whisper`), model size
-  selectable in Settings (tiny → large-v3). Language auto-detected or fixed.
+- **Transcription** with OpenAI Whisper (via `faster-whisper`); pick the
+  **Quality** in Settings, from Fastest to Most accurate (`tiny` →
+  `large-v3`). Language detected automatically or set explicitly.
 - **Speaker separation**: voices are clustered automatically and labelled
   Speaker 1, 2, 3… in order of first appearance.
 - **Name deduction**: self-introductions ("Hi, I'm John…") are used to name
@@ -49,6 +50,10 @@ your own central server on the local network).
   *Clear* resets both filters.
 - **Export** to **PDF**, **Word (.docx)** or **Excel (.xlsx)** (Excel includes
   Summary, Transcript and Speakers sheets).
+- **Your own Word template** — export into your own letterhead instead of the
+  built-in layout: design a normal Word document, put fields like
+  `{{title}}` and `{{transcript}}` where the content belongs, and Listen fills
+  them in. See [Word templates](#word-templates-exports-in-your-own-style).
 - **Central database**: push finished sessions to a shared server on your
   local network so several PCs can collect their transcripts in one place —
   see [Central server](#central-server-shared-database-on-your-network).
@@ -76,8 +81,9 @@ such as Recall.ai or Fireflies provide that as a cloud API.)
 Listen understands Afrikaans end to end:
 
 - **Transcription** — the Whisper speech engine supports Afrikaans natively.
-  Leave **Language** on `auto` in Settings and it is detected automatically,
-  or set it to `af` for the best accuracy in mixed or noisy audio.
+  Leave **Spoken language** on *Detect automatically* in Settings and it is
+  picked up on its own, or set it to Afrikaans for the best accuracy in mixed
+  or noisy audio.
 - **Summaries** — action items ("ek sal die verslag teen Vrydag stuur"),
   key issues ("die grootste probleem is…", "kwessie", "risiko"), decisions
   ("ons het ooreengekom", "besluit", "goedgekeur") and key points
@@ -90,8 +96,8 @@ Listen understands Afrikaans end to end:
   "ek is Johan" name the speaker automatically.
 - **Translation to English** — tick **Translate speech to English** in the
   Record/Import dialog to get an English transcript of Afrikaans speech
-  directly, or select an existing Afrikaans session and click **Translate to
-  English** in the toolbar to re-process its audio into a new
+  directly, or select an existing Afrikaans session and choose
+  **Transcript → Translate to English…** to re-process its audio into a new
   English-transcript session. (Translation is one-directional: any language →
   English. English → Afrikaans is not supported by the engine.) You can also
   make translation the default in Settings.
@@ -100,9 +106,90 @@ Listen understands Afrikaans end to end:
   `medium` gives the best Afrikaans accuracy if you can accept slower
   processing.
 
-Mixed English/Afrikaans meetings work too: with Language on `auto` Whisper
-follows the dominant language, and the summary keywords are recognised in
+Mixed English/Afrikaans meetings work too: with the language left on
+*Detect automatically* Whisper follows the dominant language, and the summary keywords are recognised in
 both languages at once.
+
+## Word templates (exports in your own style)
+
+The built-in Word export produces a plain document. If your organisation has a
+letterhead, a house font or a fixed minutes format, point Listen at a
+**template** instead and every export comes out in that style.
+
+A template is an ordinary `.docx` file. Wherever you want session content to
+appear, you type a **field** in double curly braces — `{{title}}`,
+`{{transcript}}`, and so on. Listen replaces each field and saves the result as
+a new document; your template file is never modified.
+
+### Setting one up
+
+Everything is under the **Word template** menu (also reachable from
+*Settings → Word template for exports*):
+
+1. **Create a starter template…** — saves a ready-made `.docx` that already
+   contains the common fields. Save it somewhere you will find it again.
+2. Open it in **Word** and make it yours: change the fonts and colours, add
+   your logo, move fields into the page header or into a table, delete the
+   fields you do not need.
+3. **Choose my Word template…** — pick that file. Listen checks it and warns
+   you about any field name it does not recognise (usually a typo).
+4. Export with **Export → Word, using my template…** (`Ctrl+E`).
+
+### Fields that fill in one spot
+
+Put these anywhere — mid-sentence, in a table cell, in the header or footer.
+The value takes the formatting of the field itself, so a bold `{{title}}`
+gives you a bold title.
+
+| Field | Fills in with |
+| --- | --- |
+| `{{title}}` | Session title, e.g. "Site meeting 12 March" |
+| `{{discussion_type}}` | Meeting, Brief, General discussion or Interview |
+| `{{date}}` | Date of the session, e.g. "25 August 2026" |
+| `{{time}}` | Start time, e.g. "14:03" |
+| `{{datetime}}` | Date and time together, e.g. "2026-08-25 14:03" |
+| `{{duration}}` | Length of the recording, e.g. "01:12:40" |
+| `{{participants}}` | All speaker names on one line, comma separated |
+| `{{speaker_count}}` | How many speakers were detected |
+| `{{line_count}}` | How many transcript lines there are |
+| `{{word_count}}` | How many words were spoken in total |
+| `{{generated_on}}` | Date and time the document was exported |
+| `{{app}}` | The name of the app that produced the document |
+
+### Fields that grow into a list
+
+These need a **paragraph of their own**, with nothing else on the line. Each
+expands into as many paragraphs as the content needs, and every generated
+paragraph copies the style of the field's own paragraph — so format
+`{{action_items}}` as a bulleted list and every action item comes out as a
+bullet.
+
+| Field | Expands into |
+| --- | --- |
+| `{{summary}}` | The whole summary: every section for this discussion type, with its heading |
+| `{{action_items}}` | One paragraph per action item / task |
+| `{{decisions}}` | One paragraph per decision |
+| `{{key_issues}}` | One paragraph per key issue (recurring ones are flagged) |
+| `{{key_points}}` | One paragraph per key point |
+| `{{participants_list}}` | One paragraph per speaker |
+| `{{transcript}}` | The full transcript: "[00:01:23] Name: what they said" |
+| `{{transcript_plain}}` | The transcript without timestamps: "Name: …" |
+
+### Worth knowing
+
+- Field names are not case sensitive, and spaces inside the braces are fine:
+  `{{ Title }}` works.
+- Type each field in one go. If you edit the middle of a field name, Word
+  sometimes splits it internally — Listen copes with that, but retyping the
+  whole field is the safe fix if one is not filled in.
+- A field Listen does not recognise is left in the document untouched, so a
+  typo shows up plainly in the export rather than vanishing.
+- Everything else in the template — page numbers, tables, images, styles,
+  headers and footers — carries through exactly as you designed it.
+- The speaker and item **filters apply to template exports too**, so you can
+  produce one person's action list on your own letterhead.
+- A section with nothing in it prints "None recorded." rather than being left
+  blank.
 
 ## Central server (shared database on your network)
 
@@ -122,10 +209,10 @@ python server\central_server.py --api-key mysecret # require a key from clients
 All pushed sessions are stored in a single SQLite file
 (`listen_central.db` by default) next to the script.
 
-**On each desktop PC**: open **Settings → Central server** and enter the
-server's URL, e.g. `http://192.168.1.10:8765` (plus the API key if the server
-uses one). Then select any session and click **Push to server** in the
-toolbar. Pushing the same session again after edits **updates** the central
+**On each desktop PC**: open **Settings → Shared database on your network**
+and enter the server's address, e.g. `http://192.168.1.10:8765` (plus the
+access key if the server uses one). Then select any session and choose
+**Export → Send to the shared database**. Pushing the same session again after edits **updates** the central
 copy rather than duplicating it, and the local session remembers when it was
 last pushed.
 
@@ -199,23 +286,34 @@ This freezes the app with PyInstaller and compiles the installer into
    and tick *Remember voice* to store them in the speaker database.
 4. Review the transcript (edit text or speaker cells as needed) and the
    summary panel below it; recurring issues are flagged in red.
-5. **Save changes** to persist edits and re-run the analysis.
-6. **Export PDF / Word / Excel**, and/or **Push to server** to send the
-   session to your central database.
+5. **Save changes** to persist edits and re-run the analysis. While you have
+   unsaved edits the window title shows a dot (•) and the button reads
+   *Save changes •*; if you switch to another recording, start a new one or
+   close the app, Listen asks whether to save them first.
+6. **Export** as PDF, Word or Excel — or **Word, using my template**
+   (`Ctrl+E`) to get the document in your own style — and/or send the session
+   to your shared database from the **Export** menu.
 
 ## Settings
 
-- **Whisper model** — bigger models are more accurate but slower on CPU
-  (`small` is a good balance; try `medium` for difficult audio).
-- **Language** — a code like `en`, `af` (Afrikaans), `nl`, or `auto` to
-  detect automatically.
-- **Translate to English by default** — every new recording/import produces
-  an English transcript regardless of the spoken language.
-- **Split sensitivity** — lower detects more speakers, higher merges them.
-- **Known-voice match threshold** — how confident a match must be before a
-  saved speaker name is applied automatically.
-- **Central server URL / API key** — where *Push to server* sends sessions.
-- **Capture system audio by default** and **default discussion type**.
+- **Quality** — Fastest, Fast, Balanced, Accurate or Most accurate. These are
+  the Whisper model sizes (`tiny` → `large-v3`); bigger is more accurate but
+  slower on CPU and a larger one-off download. *Balanced* (`small`) suits most
+  meetings; try *Accurate* (`medium`) for difficult audio or Afrikaans.
+- **Spoken language** — *Detect automatically*, or pick a language. Any other
+  Whisper code (`nl`, `de`, …) can still be typed in.
+- **Always write the transcript in English** — every new recording or import
+  produces an English transcript regardless of the spoken language.
+- **Split voices at** — lower finds more separate speakers, higher merges
+  them. Default 0.55.
+- **Recognise saved voices at** — how sure Listen must be before it puts a
+  saved name to a voice. Default 0.70.
+- **Recording** — whether to capture system audio by default, and the
+  discussion type you usually record.
+- **Word template for exports** — the `.docx` your exports are poured into;
+  see [Word templates](#word-templates-exports-in-your-own-style).
+- **Shared database** — server address and access key for *Send to the shared
+  database*.
 
 ## Troubleshooting
 
@@ -228,8 +326,18 @@ This freezes the app with PyInstaller and compiles the installer into
   Settings.
 - **Poor Afrikaans accuracy** — set Language to `af` explicitly and use the
   `small` model or larger (`medium` is best).
-- **Push to server fails** — check the server is running (`GET /health` in a
+- **A template field came out blank / still shows `{{field}}`** — check the
+  spelling against the tables above (*Word template → How Word templates
+  work…* lists them in the app), and retype the whole field in one go: Word
+  sometimes splits a field you have edited in the middle.
+- **A list field printed only one line** — list fields such as
+  `{{transcript}}` must sit on a paragraph of their own, with no other text on
+  that line.
+- **Send to the shared database fails** — check the server is running (`GET /health` in a
   browser), the URL includes `http://` and the right port, Windows Firewall
   allows the port on the host, and the API key matches.
+- **You closed Listen while it was recording** — Listen asks first, and
+  *Save* writes the audio so far to `%LOCALAPPDATA%\Listen\recordings\` as a
+  `.wav`. Start the app again and use **Import audio…** to transcribe it.
 - **Antivirus/SmartScreen warnings during setup** — the PyTorch download is
   large; allow it to finish.

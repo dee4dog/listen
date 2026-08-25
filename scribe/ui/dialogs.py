@@ -3,14 +3,42 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout,
-    QGridLayout, QGroupBox, QLabel, QLineEdit, QPushButton, QRadioButton,
-    QVBoxLayout,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
+    QFileDialog, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
+    QLineEdit, QPushButton, QRadioButton, QTextBrowser, QVBoxLayout,
 )
 
 from ..analysis.discussion import DISCUSSION_TYPES
+from . import theme
 
-MODEL_SIZES = ["tiny", "base", "small", "medium", "large-v3"]
+# Whisper model sizes, named for what the user gets rather than how big they are.
+MODEL_CHOICES = [
+    ("Fastest — rough notes", "tiny"),
+    ("Fast", "base"),
+    ("Balanced — recommended", "small"),
+    ("Accurate — slower", "medium"),
+    ("Most accurate — much slower", "large-v3"),
+]
+
+LANGUAGE_CHOICES = [
+    ("Detect automatically", "auto"),
+    ("English", "en"),
+    ("Afrikaans", "af"),
+    ("Dutch", "nl"),
+    ("German", "de"),
+    ("French", "fr"),
+    ("Portuguese", "pt"),
+    ("Spanish", "es"),
+    ("Swahili", "sw"),
+]
+
+
+def _hint(text):
+    """Small muted explanation shown under a setting."""
+    label = QLabel(text)
+    label.setWordWrap(True)
+    label.setStyleSheet(f"color: {theme.MUTED}; font-size: 9pt;")
+    return label
 
 
 class ContinueDialog(QDialog):
@@ -161,91 +189,280 @@ class SpeakerNameDialog(QDialog):
         return result
 
 
+class TemplateHelpDialog(QDialog):
+    """Explains, in plain language, how to build a Word template and lists
+    every field it can contain. Also the place to create a starter template
+    or pick an existing one."""
+
+    def __init__(self, parent, current_template=""):
+        super().__init__(parent)
+        self.setWindowTitle("Word templates — how they work")
+        self.setMinimumSize(680, 620)
+        self.choice = None          # "create" | "choose" | "clear" | None
+
+        outer = QVBoxLayout(self)
+        view = QTextBrowser()
+        view.setOpenExternalLinks(False)
+        view.setHtml(self._html(current_template))
+        outer.addWidget(view)
+
+        row = QHBoxLayout()
+        create = QPushButton("Create a starter template…")
+        create.setToolTip("Save a ready-made template you can restyle in Word")
+        create.clicked.connect(lambda: self._pick("create"))
+        choose = QPushButton("Use a template file…")
+        choose.setToolTip("Choose the .docx file Listen should export into")
+        choose.clicked.connect(lambda: self._pick("choose"))
+        row.addWidget(create)
+        row.addWidget(choose)
+        if current_template:
+            clear = QPushButton("Stop using it")
+            clear.setToolTip("Go back to the built-in Word layout")
+            clear.clicked.connect(lambda: self._pick("clear"))
+            row.addWidget(clear)
+        row.addStretch(1)
+        close = QPushButton("Close")
+        close.clicked.connect(self.reject)
+        row.addWidget(close)
+        outer.addLayout(row)
+
+    def _pick(self, choice):
+        self.choice = choice
+        self.accept()
+
+    @staticmethod
+    def _rows(fields):
+        return "".join(
+            f"<tr><td style='padding:3px 14px 3px 0'><code>{{{{{name}}}}}</code>"
+            f"</td><td style='padding:3px 0'>{desc}</td></tr>"
+            for name, desc in fields)
+
+    def _html(self, current_template):
+        # Imported here so python-docx is only loaded when the help is opened.
+        from ..exporters.docx_template import BLOCK_FIELDS, INLINE_FIELDS
+        current = (f"<p><b>Current template:</b> {current_template}</p>"
+                   if current_template else
+                   "<p><i>No template chosen yet — Word exports use the "
+                   "built-in layout.</i></p>")
+        return f"""
+<h2>Export into your own Word document</h2>
+{current}
+<p>A template is just a normal Word document — your letterhead, your fonts,
+your logo — with <b>fields</b> written in double curly braces where the
+session's content should go. Listen replaces each field and saves the result
+as a new document; your template is never changed.</p>
+
+<h3>Making one takes three steps</h3>
+<ol>
+<li>Click <b>Create a starter template…</b> below and save it somewhere you
+    will find it again.</li>
+<li>Open it in Word and make it look the way you want — change the fonts and
+    colours, add your logo, move fields into the header or into a table.
+    Delete any fields you do not need.</li>
+<li>Click <b>Use a template file…</b> and pick it. From then on
+    <b>Export &rarr; Word from my template</b> produces documents in your own
+    style.</li>
+</ol>
+
+<h3>Fields that fill in one spot</h3>
+<p>Put these anywhere — in a sentence, a table cell, the header or the
+footer. Whatever formatting you give the field is what the value gets, so
+making <code>{{{{title}}}}</code> bold gives you a bold title.</p>
+<table>{self._rows(INLINE_FIELDS)}</table>
+
+<h3>Fields that grow into a list</h3>
+<p>These need a <b>paragraph of their own</b>, with nothing else on the line.
+Each one expands into as many paragraphs as the content needs, and every
+paragraph copies the style of the field's own paragraph — so if you format
+<code>{{{{action_items}}}}</code> as a bulleted list, every action item comes
+out as a bullet.</p>
+<table>{self._rows(BLOCK_FIELDS)}</table>
+
+<h3>Worth knowing</h3>
+<ul>
+<li>Field names are not case sensitive, and spaces inside the braces are
+    fine: <code>{{{{ Title }}}}</code> works.</li>
+<li>Type each field in one go. If you edit the middle of a field name Word
+    sometimes splits it internally — Listen copes with that, but retyping the
+    whole field is the safe fix if one is not filled in.</li>
+<li>A field Listen does not recognise is left in the document untouched, so
+    a typo shows up plainly in the export.</li>
+<li>Anything else in the template — page numbers, tables, images, styles —
+    is carried through exactly as you designed it.</li>
+<li>Transcript and speaker <b>filters apply to template exports too</b>, so
+    you can produce one person's action list on your own letterhead.</li>
+</ul>
+"""
+
+
 class SettingsDialog(QDialog):
+    """Settings in plain language: what each choice does for the user, rather
+    than what it does to the engine."""
+
     def __init__(self, parent, settings):
         super().__init__(parent)
         self.setWindowTitle("Settings")
+        self.setMinimumWidth(560)
         outer = QVBoxLayout(self)
+        self._template_path = settings.get("template_path", "")
 
-        engine = QGroupBox("Transcription")
+        # ------------------------------------------------ accuracy & language
+        engine = QGroupBox("Accuracy and language")
         form = QFormLayout(engine)
         self.model_combo = QComboBox()
-        self.model_combo.addItems(MODEL_SIZES)
-        self.model_combo.setCurrentText(settings.get("model_size", "small"))
-        form.addRow("Whisper model:", self.model_combo)
-        self.language_edit = QLineEdit(settings.get("language", "auto"))
-        self.language_edit.setToolTip(
-            "Language code such as en (English), af (Afrikaans), nl, de — or\n"
-            "'auto' to detect. Setting 'af' explicitly improves Afrikaans accuracy;\n"
-            "use the 'small' model or larger for Afrikaans.")
-        form.addRow("Language:", self.language_edit)
+        for label, value in MODEL_CHOICES:
+            self.model_combo.addItem(label, value)
+        index = self.model_combo.findData(settings.get("model_size", "small"))
+        self.model_combo.setCurrentIndex(index if index >= 0 else 2)
+        form.addRow("Quality:", self.model_combo)
+        form.addRow("", _hint("Higher quality is slower and needs a bigger "
+                              "one-off download. Balanced suits most meetings."))
+
+        self.language_combo = QComboBox()
+        self.language_combo.setEditable(True)
+        for label, value in LANGUAGE_CHOICES:
+            self.language_combo.addItem(label, value)
+        self._select_language(settings.get("language", "auto"))
+        form.addRow("Spoken language:", self.language_combo)
+        form.addRow("", _hint("Leave on Detect automatically unless the audio "
+                              "is noisy or mixes languages. You may also type "
+                              "any language code, such as nl."))
+
         self.translate_default = QCheckBox(
-            "Translate speech to English by default")
-        form.addRow(self.translate_default)
+            "Always write the transcript in English")
         self.translate_default.setChecked(bool(settings.get("translate", False)))
+        form.addRow(self.translate_default)
+        form.addRow("", _hint("Speech in any language is translated into "
+                              "English. Turn this off to keep people's own "
+                              "words."))
         outer.addWidget(engine)
 
-        speakers = QGroupBox("Speaker separation")
+        # --------------------------------------------------------- speakers
+        speakers = QGroupBox("Telling speakers apart")
         form2 = QFormLayout(speakers)
         self.sensitivity = QDoubleSpinBox()
         self.sensitivity.setRange(0.30, 0.90)
         self.sensitivity.setSingleStep(0.05)
         self.sensitivity.setValue(float(settings.get("sensitivity", 0.55)))
-        self.sensitivity.setToolTip(
-            "Lower = more speakers detected, higher = fewer. Default 0.55.")
-        form2.addRow("Split sensitivity:", self.sensitivity)
+        form2.addRow("Split voices at:", self.sensitivity)
+        form2.addRow("", _hint("Lower finds more separate speakers, higher "
+                               "merges them. Change it only if two people were "
+                               "treated as one, or one as two. Default 0.55."))
         self.match_threshold = QDoubleSpinBox()
         self.match_threshold.setRange(0.50, 0.95)
         self.match_threshold.setSingleStep(0.05)
-        self.match_threshold.setValue(float(settings.get("match_threshold", 0.70)))
-        self.match_threshold.setToolTip(
-            "Minimum similarity before a voice is matched to a saved speaker.")
-        form2.addRow("Known-voice match threshold:", self.match_threshold)
+        self.match_threshold.setValue(
+            float(settings.get("match_threshold", 0.70)))
+        form2.addRow("Recognise saved voices at:", self.match_threshold)
+        form2.addRow("", _hint("How sure Listen must be before it puts a saved "
+                               "name to a voice. Raise it if the wrong name "
+                               "keeps appearing. Default 0.70."))
         outer.addWidget(speakers)
 
-        server = QGroupBox("Central server (optional)")
-        form_srv = QFormLayout(server)
-        self.server_url = QLineEdit(settings.get("server_url", ""))
-        self.server_url.setPlaceholderText("http://192.168.1.10:8765")
-        self.server_url.setToolTip(
-            "URL of a Listen central server on your network\n"
-            "(run server/central_server.py on the host machine).\n"
-            "Leave empty if you don't use a central database.")
-        form_srv.addRow("Server URL:", self.server_url)
-        self.api_key = QLineEdit(settings.get("api_key", ""))
-        self.api_key.setPlaceholderText("only if the server was started with --api-key")
-        form_srv.addRow("API key:", self.api_key)
-        outer.addWidget(server)
-
+        # -------------------------------------------------------- recording
         recording = QGroupBox("Recording")
         form3 = QFormLayout(recording)
-        self.sys_audio = QCheckBox("Capture system audio by default (for Teams / Meet)")
+        self.sys_audio = QCheckBox(
+            "Also record what the PC plays (Teams / Google Meet callers)")
         self.sys_audio.setChecked(bool(settings.get("system_audio", True)))
         form3.addRow(self.sys_audio)
         self.default_dtype = QComboBox()
         for key, cfg in DISCUSSION_TYPES.items():
             self.default_dtype.addItem(cfg["label"], key)
-        idx = self.default_dtype.findData(settings.get("default_dtype", "meeting"))
-        if idx >= 0:
-            self.default_dtype.setCurrentIndex(idx)
-        form3.addRow("Default discussion type:", self.default_dtype)
+        index = self.default_dtype.findData(
+            settings.get("default_dtype", "meeting"))
+        if index >= 0:
+            self.default_dtype.setCurrentIndex(index)
+        form3.addRow("Usually recording a:", self.default_dtype)
         outer.addWidget(recording)
 
+        # ------------------------------------------------- Word template
+        docs = QGroupBox("Word template for exports")
+        form4 = QFormLayout(docs)
+        row = QHBoxLayout()
+        self.template_edit = QLineEdit(self._template_path)
+        self.template_edit.setPlaceholderText(
+            "Not set — Word exports use the built-in layout")
+        browse = QPushButton("Browse…")
+        browse.clicked.connect(self._browse_template)
+        help_btn = QPushButton("How do I make one?")
+        help_btn.clicked.connect(self._show_template_help)
+        row.addWidget(self.template_edit, 1)
+        row.addWidget(browse)
+        form4.addRow("Template:", row)
+        form4.addRow("", help_btn)
+        form4.addRow("", _hint("Export your sessions into your own Word "
+                               "document — letterhead, fonts and all."))
+        outer.addWidget(docs)
+
+        # ---------------------------------------------------- central server
+        server = QGroupBox("Shared database on your network (optional)")
+        form5 = QFormLayout(server)
+        self.server_url = QLineEdit(settings.get("server_url", ""))
+        self.server_url.setPlaceholderText(
+            "Leave empty unless your office runs one")
+        form5.addRow("Server address:", self.server_url)
+        self.api_key = QLineEdit(settings.get("api_key", ""))
+        self.api_key.setPlaceholderText("only if the server needs a key")
+        form5.addRow("Access key:", self.api_key)
+        form5.addRow("", _hint("Sends finished sessions to one shared "
+                               "database, so several PCs collect their "
+                               "transcripts in one place."))
+        outer.addWidget(server)
+
         buttons = QDialogButtonBox(
-            QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=self)
+            QDialogButtonBox.Save | QDialogButtonBox.Cancel, parent=self)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         outer.addWidget(buttons)
 
+    # ------------------------------------------------------------- helpers
+
+    def _select_language(self, code):
+        index = self.language_combo.findData(code)
+        if index >= 0:
+            self.language_combo.setCurrentIndex(index)
+        else:
+            self.language_combo.setCurrentText(code)
+
+    def _browse_template(self):
+        start = self.template_edit.text().strip() or str(Path.home())
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose a Word template", start, "Word document (*.docx)")
+        if path:
+            self.template_edit.setText(path)
+
+    def _show_template_help(self):
+        dialog = TemplateHelpDialog(self, self.template_edit.text().strip())
+        dialog.exec()
+        if dialog.choice == "choose":
+            self._browse_template()
+        elif dialog.choice == "clear":
+            self.template_edit.clear()
+        elif dialog.choice == "create":
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Save starter template",
+                str(Path.home() / "Listen template.docx"),
+                "Word document (*.docx)")
+            if path:
+                from ..exporters.docx_template import write_starter_template
+                write_starter_template(path)
+                self.template_edit.setText(path)
+
     def values(self):
+        text = self.language_combo.currentText().strip()
+        index = self.language_combo.findText(text)
+        language = (self.language_combo.itemData(index) if index >= 0
+                    else text) or "auto"
         return {
-            "model_size": self.model_combo.currentText(),
-            "language": self.language_edit.text().strip() or "auto",
+            "model_size": self.model_combo.currentData(),
+            "language": language,
             "translate": self.translate_default.isChecked(),
             "sensitivity": round(self.sensitivity.value(), 2),
             "match_threshold": round(self.match_threshold.value(), 2),
             "system_audio": self.sys_audio.isChecked(),
             "default_dtype": self.default_dtype.currentData(),
+            "template_path": self.template_edit.text().strip(),
             "server_url": self.server_url.text().strip(),
             "api_key": self.api_key.text().strip(),
         }

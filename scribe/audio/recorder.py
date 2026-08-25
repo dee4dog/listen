@@ -78,6 +78,13 @@ class Recorder:
         """Loudest current input level (RMS, 0..1) across mic and system audio."""
         return max(self._levels.values()) if self._levels else 0.0
 
+    def discard(self):
+        """Stop capture and throw the audio away without writing a file."""
+        self._stop.set()
+        for t in self._threads:
+            t.join(timeout=5)
+        self._buffers = {"mic": [], "sys": []}
+
     def stop(self, out_path):
         """Stop capture, mix mic + system audio, write 16 kHz mono WAV."""
         self._stop.set()
