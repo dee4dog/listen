@@ -290,6 +290,7 @@ class MainWindow(QMainWindow):
 
         self.session_list = QListWidget()
         self.session_list.itemSelectionChanged.connect(self.on_session_selected)
+        self.session_list.itemClicked.connect(self._on_session_clicked)
 
         # Left panel: logo, theme toggle below it, then the session list.
         self.logo_label = QLabel()
@@ -759,6 +760,13 @@ class MainWindow(QMainWindow):
             self.session_list.addItem(empty)
         self.session_list.blockSignals(False)
 
+    def _on_session_clicked(self, item):
+        """Clicking the recording that is already selected emits no selection
+        change, so handle the click as well — otherwise there is no way back
+        from the welcome page to the session you were just reading."""
+        if item.data(Qt.UserRole) is not None:
+            self.on_session_selected()
+
     def on_session_selected(self):
         items = self.session_list.selectedItems()
         if not items:
@@ -767,7 +775,10 @@ class MainWindow(QMainWindow):
         if sid is None:
             return
         if self.session is not None and self.session.id == sid:
-            self.show_session()   # e.g. coming back from the welcome page
+            # Already open — e.g. coming back from the welcome page. Fold any
+            # edits in first, since show_session() repaints from the session.
+            self._collect_table()
+            self.show_session()
             return
         if not self._confirm_discard("opening another recording"):
             self._reselect_current_session()

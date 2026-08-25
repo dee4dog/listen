@@ -262,6 +262,18 @@ space for dependencies and models.
   `%LOCALAPPDATA%\Listen`. Your data lives here regardless of how you
   installed, and it survives uninstalling/reinstalling the app.
 
+### Running the tests
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest
+```
+
+The suite covers the Word-template exporter (including the run-splitting Word
+does to placeholders) and the desktop UI, which is built on Qt's offscreen
+platform against a throwaway data directory — so the tests never touch your
+own database, recordings or exports, and need no display. Message boxes are
+stubbed, so a prompt that appears when it should not fails the test.
+
 ### Building the installer yourself
 
 To produce the `Listen-Setup-<version>.exe` from source you need
